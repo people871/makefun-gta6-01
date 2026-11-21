@@ -1,98 +1,124 @@
-// Keyboard and mouse input for SOLMAR HEAT.
-// Held keys steer on foot and in a car; one-shot presses (interact, punch,
-// pause, confirm, mute) are queued as bit flags and taken once by the loop.
-export const ACTION_CONFIRM = 1;
-export const ACTION_PAUSE = 2;
-export const ACTION_INTERACT = 4;
-export const ACTION_PUNCH = 8;
-export const ACTION_MUTE = 16;
+// Keyboard and mouse input for SOLMAR HEAT. Every physical key maps to
+// one role; held roles steer on foot and in a car, while one-shot roles
+// (interact, punch, pause, confirm, mute) are queued as bit flags and taken
+// once per frame by the loop. Keeping the mapping in a single table means a
+// new binding is one line, and the held set still stores raw codes, so
+// releasing one of two keys bound to the same direction never drops the
+// other one.
 
-const UP = new Set(['ArrowUp', 'KeyW']);
-const DOWN = new Set(['ArrowDown', 'KeyS']);
-const LEFT = new Set(['ArrowLeft', 'KeyA']);
-const RIGHT = new Set(['ArrowRight', 'KeyD']);
-const SPRINT = new Set(['ShiftLeft', 'ShiftRight']);
-const CONFIRM = new Set(['Enter', 'Space']);
-const PAUSE = new Set(['KeyP', 'Escape']);
-// E steals and enters cars; V is the same action for left-handed players.
-const INTERACT = new Set(['KeyE', 'KeyV']);
-// F or J punches; X is a third way, so a mouse-free player always has one.
-const PUNCH = new Set(['KeyF', 'KeyJ', 'KeyX']);
-const MUTE = new Set(['KeyM']);
+// One-shot action flags, consumed once per frame via takeActions().
+export const ACTION_CONFIRM = 1 << 0;
+export const ACTION_PAUSE = 1 << 1;
+export const ACTION_INTERACT = 1 << 2;
+export const ACTION_PUNCH = 1 << 3;
+export const ACTION_MUTE = 1 << 4;
 
-export function createInput(target) {
-  const held = new Set();
-  let actions = 0;
-  let mouseX = 0;
-  let mouseY = 0;
+// Role -> the physical codes that trigger it. E steals and enters cars; V
+// is the same action for left-handed players. F or J punches; X is a third
+// way, so a mouse-free player always has one.
+const BINDINGS = [
+  ['up', ['ArrowUp', 'KeyW']],
+  ['down', ['ArrowDown', 'KeyS']],
+  ['left', ['ArrowLeft', 'KeyA']],
+  ['right', ['ArrowRight', 'KeyD']],
+  ['sprint', ['ShiftLeft', 'ShiftRight']],
+  ['confirm', ['Enter', 'Space']],
+  ['pause', ['KeyP', 'Escape']],
+  ['interact', ['KeyE', 'KeyV']],
+  ['punch', ['KeyF', 'KeyJ', 'KeyX']],
+  ['mute', ['KeyM']],
+];
 
-  function onKeyDown(event) {
-    if (UP.has(event.code) || DOWN.has(event.code) || LEFT.has(event.code) || RIGHT.has(event.code) || SPRINT.has(event.code)) {
-      held.add(event.code);
-      event.preventDefault();
-      return;
+// code -> role, flattened out of the table above.
+const ROLE_BY_CODE = new Map(
+  BINDINGS.flatMap(([role, codes]) => codes.map((code) => [code, role])),
+);
+
+// Roles that stay live while held, rather than firing once per press.
+const HELD_ROLES = new Set(['sprint', 'up', 'down', 'left', 'right']);
+
+// One-shot role -> its action flag.
+const FLAG_BY_ROLE = { mute: ACTION_MUTE, punch: ACTION_PUNCH, interact: ACTION_INTERACT, pause: ACTION_PAUSE, confirm: ACTION_CONFIRM };
+
+export const createInput = (target) => {
+  const downCodes = new Set(); // raw event.code values currently down
+  let pending = 0; // one-shot flags waiting to be taken
+  let pointerX = 0;
+  let pointerY = 0;
+
+  const keyDown = (event) => {
+    const found = ROLE_BY_CODE.get(event.code);
+    if (found === undefined) {
+      // unmapped key: let the browser have it
+    } else if (HELD_ROLES.has(found)) {
+      downCodes.add(event.code);
+      event['preventDefault']();
+    } else if (event.repeat === false) {
+      pending |= FLAG_BY_ROLE[found];
+      event['preventDefault']();
     }
-    if (event.repeat) return;
-    if (CONFIRM.has(event.code)) actions |= ACTION_CONFIRM;
-    else if (PAUSE.has(event.code)) actions |= ACTION_PAUSE;
-    else if (INTERACT.has(event.code)) actions |= ACTION_INTERACT;
-    else if (PUNCH.has(event.code)) actions |= ACTION_PUNCH;
-    else if (MUTE.has(event.code)) actions |= ACTION_MUTE;
-    else return;
-    event.preventDefault();
-  }
+  };
 
-  function onKeyUp(event) {
-    held.delete(event.code);
-  }
+  const keyUp = (event) => {
+    downCodes.delete(event.code);
+  };
 
-  function onBlur() {
-    held.clear();
-  }
+  const loseFocus = () => {
+    downCodes.clear();
+  };
 
-  function onPointerMove(event) {
-    const rect = target.getBoundingClientRect();
-    mouseX = event.clientX - rect.left;
-    mouseY = event.clientY - rect.top;
-  }
+  const trackPointer = (event) => {
+    const box = target.getBoundingClientRect();
+    pointerX = event.clientX - box.left;
+    pointerY = event.clientY - box.top;
+  };
 
-  function onPointerDown(event) {
-    onPointerMove(event);
-    // Clicking punches (on foot) and also confirms on menus.
-    actions |= ACTION_PUNCH | ACTION_CONFIRM;
-  }
+  const pressPointer = (event) => {
+    trackPointer(event);
+    // A click punches on foot and also confirms on menus.
+    pending |= ACTION_PUNCH | ACTION_CONFIRM;
+  };
 
-  window.addEventListener('keydown', onKeyDown);
-  window.addEventListener('keyup', onKeyUp);
-  window.addEventListener('blur', onBlur);
-  target.addEventListener('pointermove', onPointerMove);
-  target.addEventListener('pointerdown', onPointerDown);
+  window.addEventListener('keydown', keyDown);
+  window.addEventListener('keyup', keyUp);
+  window.addEventListener('blur', loseFocus);
+  target.addEventListener('pointermove', trackPointer);
+  target.addEventListener('pointerdown', pressPointer);
 
-  function has(set) {
-    for (const code of set) if (held.has(code)) return true;
-    return false;
-  }
+  const heldRole = (wanted) => {
+    let found = false;
+    for (const code of downCodes) {
+      if (ROLE_BY_CODE.get(code) === wanted) found = true;
+    }
+    return found;
+  };
 
-  return {
-    /** {x, y} in -1..1: up/down/left/right from the held keys. */
-    move() {
-      const x = (has(RIGHT) ? 1 : 0) - (has(LEFT) ? 1 : 0);
-      const y = (has(DOWN) ? 1 : 0) - (has(UP) ? 1 : 0);
-      return { x, y, sprint: has(SPRINT) };
+  const api = {
+    // {x, y} in -1..1: up/down/left/right from the held keys.
+    move: () => {
+      const x = (heldRole('right') ? 1 : 0) - (heldRole('left') ? 1 : 0);
+      const y = (heldRole('down') ? 1 : 0) - (heldRole('up') ? 1 : 0);
+      return { x, y, sprint: heldRole('sprint') };
     },
-    up: () => has(UP),
-    down: () => has(DOWN),
-    left: () => has(LEFT),
-    right: () => has(RIGHT),
-    sprint: () => has(SPRINT),
-    mouse() {
-      return { x: mouseX, y: mouseY };
+    up() { return heldRole('up'); },
+    down() { return heldRole('down'); },
+    left() { return heldRole('left'); },
+    right() { return heldRole('right'); },
+    sprint() { return heldRole('sprint'); },
+    mouse: () => {
+      return { x: pointerX, y: pointerY };
     },
-    /** One-shot actions queued since the last take, as bit flags. */
-    takeActions() {
-      const taken = actions;
-      actions = 0;
-      return taken;
+    // One-shot actions queued since the last take, as bit flags.
+    takeActions: () => {
+      const snapshot = pending;
+      pending = 0;
+      return snapshot;
+    },
+    // Drop every held key and queued action (handy when the game pauses).
+    reset() {
+      downCodes.clear();
+      pending = 0;
     },
   };
-}
+  return api;
+};

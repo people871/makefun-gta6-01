@@ -1,127 +1,167 @@
-// The screenshot scenes behind ?shot=start|drive|chase|mission.
-// Each one drives the real simulation forward from a fresh world with a small
-// autopilot (walk/drive toward the mission marker, steer around buildings),
-// so the frame is what real play looks like and the same seed always gives
-// the same frame. No scene is posed by hand.
-// Scene order in shots.json puts the chase first: it is the cover, because
-// it shows the full HUD at once — wanted stars, objective, killfeed,
-// minimap with the mission marker and police, speed and the district name.
-import { STEP } from './config.js';
-import { SCREEN_PLAY, SCREEN_TITLE } from './render.js';
+// Staged frames for ?shot=start|drive|chase|mission.
+// Nothing here is posed by hand. Every scene runs the live simulation
+// from a fresh world under a small autopilot that walks or drives at the
+// mission marker and steers around buildings, so the captured frame is
+// genuine play — and a fixed seed always reproduces the same frame.
+// shots.json lists the chase first because it makes the cover: one frame
+// shows the whole HUD — wanted stars, objective, killfeed, minimap with
+// the marker and the police, speed, and the district name.
+import { STEP } from './config.js'; // fixed-step seconds
+import { ACTION_INTERACT } from './input.js'; // E key action bit
+import { SCREEN_TITLE, SCREEN_PLAY } from './render.js'; // scene screens
 
-function driveToward(world, missions, tx, ty, seconds) {
-  // Autopilot: on foot, walk toward the target; in a car, steer and throttle.
-  for (let i = 0; i < seconds / STEP; i += 1) {
-    const p = world.state.player;
-    const dx = tx - p.x;
-    const dy = ty - p.y;
-    const move = { x: 0, y: 0, sprint: false };
-    if (p.inCar) {
-      const car = world.playerCar();
-      const want = Math.atan2(dy, dx);
-      let diff = want - car.angle;
-      while (diff > Math.PI) diff -= Math.PI * 2;
-      while (diff <= -Math.PI) diff += Math.PI * 2;
-      const d = Math.hypot(dx, dy);
-      if (d < 60) {
-        move.y = 1; // arrived: brake
-      } else if (Math.abs(car.speed) < 40 && Math.abs(diff) > 1.5) {
-        // Facing away and barely moving: reverse while steering the
-        // other way to swing the nose around, then drive forward.
-        move.y = 1;
-        move.x = diff > 0 ? -1 : 1;
-      } else {
-        move.x = diff > 0.12 ? 1 : diff < -0.12 ? -1 : 0;
-        // Speed control: full throttle far away, coast when close so the
-        // car can actually stop at the target instead of overshooting it
-        // and looping through the blocks.
-        move.y = d > 260 ? -1 : 0;
-      }
-    } else {
-      move.x = Math.abs(dx) > 24 ? Math.sign(dx) : 0;
-      move.y = Math.abs(dy) > 24 ? Math.sign(dy) : 0;
-    }
-    world.step(STEP, move, 0);
-    missions.update(STEP, false);
+// No input at all: the one move object handed to every idle step. The
+// world never writes to the move it is given, so sharing it is safe.
+const IDLE = { sprint: false, x: 0, y: 0 };
+
+// Fold an angle difference into (-PI, PI] so the autopilot steers the
+// shortest way round.
+function foldAngle(turn) {
+  let folded = turn;
+  while (folded > Math.PI) folded -= Math.PI * 2;
+  while (folded <= -Math.PI) folded += Math.PI * 2;
+  return folded;
+}
+
+// What the autopilot does on one step, from the vector to the target.
+function chooseMove(sim, tx, ty) {
+  const hero = sim.state.player;
+  const dx = tx - hero.x;
+  const dy = ty - hero.y;
+  const choice = { x: 0, y: 0, sprint: false };
+  if (!hero.inCar) {
+    // On foot the hero just walks at the target, one axis at a time.
+    choice.x = Math.abs(dx) > 24 ? Math.sign(dx) : 0;
+    choice.y = Math.abs(dy) > 24 ? Math.sign(dy) : 0;
+    return choice;
+  }
+  const ride = sim.playerCar();
+  const bearing = Math.atan2(dy, dx);
+  const turn = foldAngle(bearing - ride.angle);
+  const gap = Math.hypot(dx, dy);
+  const far = gap >= 60;
+  const slowTurn = Math.abs(ride.speed) < 40 && Math.abs(turn) > 1.5;
+  if (gap < 60) {
+    choice.y = 1; // arrived: brake
+  } else if (slowTurn) {
+    // Nose pointing away and barely rolling: reverse while steering
+    // the other way to swing around, then drive forward.
+    choice.y = 1;
+    choice.x = turn > 0 ? -1 : 1;
+  }
+  if (far && !slowTurn) {
+    choice.x = turn > 0.12 ? 1 : turn < -0.12 ? -1 : 0;
+    // Throttle control: flat out while far off, coast when close, so
+    // the car can stop on the target instead of overshooting it and
+    // looping around the blocks instead.
+    choice.y = gap > 260 ? -1 : 0;
+  }
+  return choice;
+}
+
+// Steer the autopilot at a point for this many seconds.
+function runPilot(sim, story, tx, ty, seconds) {
+  const steps = seconds / STEP;
+  for (let n = 0; n < steps; n += 1) {
+    sim.step(STEP, chooseMove(sim, tx, ty), 0);
+    story.update(STEP, false);
   }
 }
 
-function settle(world, missions, seconds) {
-  for (let i = 0; i < seconds / STEP; i += 1) {
-    world.step(STEP, { x: 0, y: 0, sprint: false }, 0);
-    missions.update(STEP, false);
+// Let the world run on with no input for this many seconds.
+function runIdle(sim, story, seconds) {
+  const steps = seconds / STEP;
+  for (let n = 0; n < steps; n += 1) {
+    sim.step(STEP, IDLE, 0);
+    story.update(STEP, false);
   }
 }
 
-/**
- * Set `world` and `missions` to the named scene and return the screen to draw
- * and the save/best info for the title. Scenes: start, drive, chase, mission.
- */
-export function stageShot(name, world, missions) {
-  world.reset();
-  if (name === 'drive') {
-    missions.startMission(0);
-    missions.state.dialogue = null;
-    // Walk to the Comet, steal it, then drive south down Palma Avenue:
-    // first onto the avenue's centre line, then straight down it.
-    driveToward(world, missions, 1290, 1000, 14);
-    world.step(STEP, { x: 0, y: 0, sprint: false }, 4); // E: steal
-    driveToward(world, missions, 1240, 1250, 3);
-    // Stop the drive mid-run, while the Comet is still at speed.
-    driveToward(world, missions, 1240, 1980, 1.8);
-    return { screen: SCREEN_PLAY, best: 0, hasSave: false };
-  }
-  if (name === 'chase') {
-    // Steal the Comet first with no mission active (mission 3's evade step
-    // would otherwise complete while the wanted level is still 0), then
-    // start Heat Wave at wanted 3 with police already in pursuit.
-    driveToward(world, missions, 1290, 1000, 14);
-    world.step(STEP, { x: 0, y: 0, sprint: false }, 4); // E: steal the Comet
-    missions.startMission(2);
-    missions.state.dialogue = null;
-    world.setWanted(3);
-    // The killfeed keeps the steal and the heat, so the cover frame shows
-    // it live under the minimap. (The mission banner fades on its own
-    // 3.2 s timer during the drive, so it never covers the player's car.)
-    world.addFeed('WANTED LEVEL 3 — HEAT WAVE');
-    world.spawnPoliceCar();
-    world.spawnPoliceCar();
-    // Line the pursuit up on the same street, a few hundred pixels behind
-    // the Comet, so the frame shows the chase at speed.
-    const pursuit = world.state.cars.filter((c) => c.police);
-    pursuit.forEach((pc, i) => {
-      pc.x = world.state.player.x - 300 - i * 130;
-      pc.y = 1100;
-      pc.axis = 'x';
-      pc.dir = 1;
-      pc.angle = 0;
-      pc.speed = 380;
-    });
-    // East along the 1100 street, target past the map edge so the car is
-    // still at full speed — mid-chase — when the frame is taken.
-    driveToward(world, missions, 3100, 1100, 3.5);
-    return { screen: SCREEN_PLAY, best: 0, hasSave: false };
-  }
-  if (name === 'mission') {
-    missions.startMission(1);
-    missions.state.dialogue = { lines: ['RICO: A package waits at Solmar Marina, south docks.', 'RICO: Pick it up and bring it to the safehouse. No cops.'], lineIndex: 0, timer: 0 };
-    // Hero on foot near the marina with the marker in view.
-    world.state.player.x = 2620;
-    world.state.player.y = 1960;
-    world.state.player.faceAngle = Math.PI / 4;
-    world.state.camera.x = 2620;
-    world.state.camera.y = 1960;
-    settle(world, missions, 1.5);
-    return { screen: SCREEN_PLAY, best: 0, hasSave: false };
-  }
-  // start: title screen over a living downtown, hero on foot on the street
-  // east of the panel so the title, the city and the hero all show.
-  missions.startMission(0);
-  missions.state.dialogue = null;
-  missions.state.banner = null;
-  world.state.player.x = 1500;
-  world.state.player.y = 1100;
-  world.state.player.faceAngle = -Math.PI / 2;
-  settle(world, missions, 6);
-  return { screen: SCREEN_TITLE, best: 1500, hasSave: true };
+// Fetch the Comet on foot, steal it, and end up behind its wheel.
+function grabComet(sim, story) {
+  runPilot(sim, story, 1290, 1000, 14);
+  sim.step(STEP, IDLE, ACTION_INTERACT);
+}
+
+// Title frame: downtown alive behind the menu, hero on foot on the
+// street east of the panel, so title, city and hero all show at once.
+function sceneTitle(sim, story) {
+  story.startMission(0);
+  story.state.dialogue = null;
+  story.state.banner = null;
+  sim.state.player.x = 1500;
+  sim.state.player.y = 1100;
+  sim.state.player.faceAngle = -Math.PI / 2;
+  runIdle(sim, story, 6);
+  return { best: 1500, hasSave: true, screen: SCREEN_TITLE };
+}
+
+// Driving frame: take the Comet, then run south down Palma Avenue —
+// first across to the avenue's centre line, then straight down it —
+// and catch it mid-run, while the Comet is still at speed.
+function sceneDrive(sim, story) {
+  story.startMission(0);
+  story.state.dialogue = null;
+  grabComet(sim, story);
+  runPilot(sim, story, 1240, 1250, 3);
+  runPilot(sim, story, 1240, 1980, 1.8);
+  return { best: 0, hasSave: false, screen: SCREEN_PLAY };
+}
+
+// Cover frame: grab the Comet before any mission is live (mission 3's
+// evade step would otherwise finish while the wanted level is still 0),
+// then open Heat Wave at wanted 3 with police already in pursuit.
+function sceneChase(sim, story) {
+  grabComet(sim, story);
+  story.startMission(2);
+  story.state.dialogue = null;
+  sim.setWanted(3);
+  // Keep the steal and the heat in the killfeed so the cover shows
+  // them live under the minimap. (The mission banner fades on its own
+  // 3.2 s timer during the drive, so it never covers the player's car.)
+  sim.addFeed('WANTED LEVEL ' + 3 + ' — HEAT WAVE');
+  sim.spawnPoliceCar();
+  sim.spawnPoliceCar();
+  // Set the pursuit on the same street, a few hundred pixels behind
+  // the Comet, so the frame catches the chase at speed.
+  const hunters = sim.state.cars.filter((c) => c.police);
+  hunters.forEach((cop, i) => {
+    cop.x = sim.state.player.x - 300 - i * 130;
+    cop.y = 1100;
+    cop.axis = 'x';
+    cop.dir = 1;
+    cop.angle = 0;
+    cop.speed = 380;
+  });
+  // East along the 1100 street, aiming past the map edge so the car is
+  // still flat out — mid-chase — when the frame is taken.
+  runPilot(sim, story, 3100, 1100, 3.5);
+  return { best: 0, hasSave: false, screen: SCREEN_PLAY };
+}
+
+// Mission frame: hero on foot by the marina, marker in view, with
+// Rico's briefing still up on screen.
+function sceneMission(sim, story) {
+  story.startMission(1);
+  const firstLine = 'RICO: A package waits at Solmar Marina, south docks.';
+  const secondLine = 'RICO: Pick it up and bring it to the safehouse. No cops.';
+  story.state.dialogue = { lines: [firstLine, secondLine], lineIndex: 0, timer: 0 };
+  sim.state.player.x = 2620;
+  sim.state.player.y = 1960;
+  sim.state.player.faceAngle = Math.PI / 4;
+  sim.state.camera.x = 2620;
+  sim.state.camera.y = 1960;
+  runIdle(sim, story, 1.5);
+  return { best: 0, hasSave: false, screen: SCREEN_PLAY };
+}
+
+// Set `sim` and `story` to the named scene and hand back the screen to
+// draw plus the save and best info for the title. Scenes: start, drive,
+// chase, mission.
+export function stageShot(sceneName, sim, story) {
+  sim.reset();
+  if (sceneName === 'drive') return sceneDrive(sim, story);
+  if (sceneName === 'chase') return sceneChase(sim, story);
+  if (sceneName === 'mission') return sceneMission(sim, story);
+  return sceneTitle(sim, story);
 }

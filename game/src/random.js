@@ -1,62 +1,75 @@
-// Seeded random numbers (mulberry32) plus small helpers the city generator
-// and the screenshot staging share, so the same seed always builds the same city.
-export function createRandom(seed) {
-  let a = seed | 0;
-  return function random() {
-    a = (a + 0x6d2b79f5) | 0;
-    let t = Math.imul(a ^ (a >>> 15), 1 | a);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+// Seeded chance for SOLMAR HEAT. One mulberry32 stream backs everything
+// that has to rebuild the same way every run: city blocks, parked cars,
+// traffic, walkers, stash spots. One seed in, the same Solmar Bay out.
+// The helpers after the generator are the shared toolkit world.js and the
+// staging scripts draw from: clamps, squared distances, bearings, blends,
+// draws and shuffles.
+
+// mulberry32's increment, written out in decimal, and the 2^32 divisor the
+// raw 32-bit output is scaled by to land in [0, 1).
+const STEP_ADD = 1831565813;
+const UINT32 = 2 ** 32;
+
+// A full turn in radians, shared by the angle helpers below.
+export const TAU = Math.PI * 2;
+
+// A repeatable stream of floats in [0, 1), seeded by `seed`.
+export const createRandom = (seed) => {
+  let state = 0 | seed;
+  const next = () => {
+    state = (STEP_ADD + state) | 0;
+    const first = Math.imul(state ^ (state >>> 15), state | 1);
+    const second = (first + Math.imul(first ^ (first >>> 7), first | 61)) ^ first;
+    return ((second ^ (second >>> 14)) >>> 0) / UINT32;
   };
-}
+  return next;
+};
 
-export function range(random, min, max) {
-  return min + random() * (max - min);
-}
+// Clamp `value` into the closed interval [lo, hi].
+export const clamp = (value, lo, hi) => (value < lo ? lo : value > hi ? hi : value);
 
-/** Whole number in [min, max], inclusive, from the seeded stream. */
-export function randInt(random, min, max) {
-  return min + Math.floor(random() * (max - min + 1));
-}
+// Squared distance between two points, skipping the square root.
+export const dist2 = (ax, ay, bx, by) => (ax - bx) * (ax - bx) + (ay - by) * (ay - by);
 
-export function pick(random, list) {
-  return list[Math.floor(random() * list.length)];
-}
+// Bearing from (ax, ay) toward (bx, by), in radians.
+export const angleTo = (ax, ay, bx, by) => {
+  const rise = by - ay;
+  const run = bx - ax;
+  return Math.atan2(rise, run);
+};
 
-/** Fisher–Yates shuffle of a copy, driven by the seeded stream. */
-export function shuffle(random, list) {
-  const out = list.slice();
-  for (let i = out.length - 1; i > 0; i -= 1) {
-    const j = Math.floor(random() * (i + 1));
-    const tmp = out[i];
-    out[i] = out[j];
-    out[j] = tmp;
+// Shortest signed turn from `a` to `b`, landing in (-PI, PI].
+export const angleDiff = (a, b) => {
+  let d = -a + b;
+  for (; d > Math.PI; d -= TAU) { /* spin down past +PI */ }
+  for (; d <= -Math.PI; d += TAU) { /* spin up past -PI */ }
+  return +d;
+};
+
+// Linear blend between `a` and `b`: `a` at t=0, `b` at t=1.
+export const lerp = (a, b, t) => a+(b-a)*t;
+
+// A float in [min, max) drawn from the seeded stream.
+export const range = (random, min, max) => min+random()*(max-min);
+
+// A whole number in [min, max], inclusive, from the seeded stream.
+export const randInt = (random, min, max) => {
+  const span = max - min + 1;
+  return min + Math.floor(random() * span);
+};
+
+// One element of `list`, chosen by the seeded stream.
+export const pick = (random, list) => {
+  const slot = Math.floor(random() * list.length);
+  return list[slot];
+};
+
+// Fisher-Yates shuffle of a copy, driven by the seeded stream.
+export const shuffle = (random, list) => {
+  const out = list.slice(0);
+  for (let i = out.length - 1; 0 < i; i -= 1) {
+    const j = Math.floor(random() * (1 + i));
+    [out[i], out[j]] = [out[j], out[i]];
   }
-  return out;
-}
-
-export function clamp(value, min, max) {
-  return value < min ? min : value > max ? max : value;
-}
-
-export function dist2(ax, ay, bx, by) {
-  const dx = ax - bx;
-  const dy = ay - by;
-  return dx * dx + dy * dy;
-}
-
-export function angleTo(ax, ay, bx, by) {
-  return Math.atan2(by - ay, bx - ax);
-}
-
-/** Shortest signed turn from angle a to angle b, in (-PI, PI]. */
-export function angleDiff(a, b) {
-  let d = b - a;
-  while (d > Math.PI) d -= Math.PI * 2;
-  while (d <= -Math.PI) d += Math.PI * 2;
-  return d;
-}
-
-export function lerp(a, b, t) {
-  return a + (b - a) * t;
-}
+  return [...out];
+};

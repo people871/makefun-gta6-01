@@ -1,435 +1,497 @@
-// Boot and the one loop for SOLMAR HEAT: input every frame, the world advances
-// in fixed 1/60 s steps, missions tick alongside it, and the renderer paints.
-// Screens: title, play, paused, wasted, busted.
-//
-// ?seed=N fixes the city. ?shot=start|drive|chase|mission (with &seed=N) stages
-// that scene instead of running the loop, paints it twice and sets
-// window.__shotReady for a screenshot. ?selftest=1 runs the logic checks and
-// sets window.__selftest.
-import { BEST_KEY, MONEY, SAVE_KEY, STEP } from './config.js';
-import { createRandom } from './random.js';
-import { createWorld, EVENT_BUSTED, EVENT_CRASH, EVENT_PICKUP, EVENT_PUNCH, EVENT_STASH, EVENT_STEAL, EVENT_WASTED, EVENT_WANTED_UP } from './world.js';
-import { createMissions, MISSIONS } from './missions.js';
-import { createAudio } from './audio.js';
-import { ACTION_CONFIRM, ACTION_INTERACT, ACTION_MUTE, ACTION_PAUSE, ACTION_PUNCH, createInput } from './input.js';
-import { createRenderer, SCREEN_BUSTED, SCREEN_OVER, SCREEN_PAUSED, SCREEN_PLAY, SCREEN_TITLE } from './render.js';
-import { stageShot } from './shots.js';
+// SOLMAR HEAT — boot plus game loop for the Solmar Bay crime sandbox.
+// The boot picks one mode, the loop runs the game.
+// The page boots into exactly one of three modes, picked from the URL:
+//   ?selftest=1   headless checks over the world and the missions; the
+//                 outcome lands on window.__selftest for the harness.
+//   ?shot=<name>  a staged frame (start, drive, chase, mission) painted
+//                 twice, then window.__shotReady flips to true.
+//   (plain)       the playable game: title, play, paused, wasted, busted.
+// Play runs on a single requestAnimationFrame loop. Keys are sampled once
+// per frame and the simulation then steps in fixed 1/60 s slices, so it
+// plays the same on a 60 Hz screen and a 144 Hz one. A save slot and a
+// best-money record live in localStorage.
+import { STEP, SAVE_KEY, BEST_KEY, MONEY } from './config.js';
+import { MISSIONS, createMissions } from './missions.js';
+import { createWorld, EVENT_WANTED_UP, EVENT_WASTED,
+    EVENT_STEAL, EVENT_STASH, EVENT_PUNCH,
+    EVENT_PICKUP, EVENT_CRASH, EVENT_BUSTED } from './world.js';
+import { createInput, ACTION_PUNCH, ACTION_PAUSE,
+    ACTION_MUTE, ACTION_INTERACT, ACTION_CONFIRM } from './input.js';
+import { SCREEN_TITLE, SCREEN_PLAY, SCREEN_PAUSED,
+    SCREEN_OVER, SCREEN_BUSTED, createRenderer } from './render.js';
+import { createRandom } from './random.js'; // rng factory
+import { createAudio } from './audio.js'; // synth effects and engine hum
+import { stageShot } from './shots.js'; // screenshot scene staging
 
-const MAX_FRAME = 0.25;
-
+// What the URL asked for, and the seed the world is built from.
 const params = new URLSearchParams(window.location.search);
 const shot = params.get('shot');
-const selftest = params.get('selftest') === '1';
-const seedParam = Number.parseInt(params.get('seed') ?? '', 10);
-const seed = Number.isInteger(seedParam) ? seedParam : Math.floor(Math.random() * 4294967296);
+const selftestMode = params.get('selftest') === '1';
+const seedText = params.get('seed') ?? '';
+const seedNum = Number.parseInt(seedText, 10);
+const seedValue = Number.isInteger(seedNum) ? seedNum : Math.floor(Math.random() * 2 ** 32);
 
-const canvas = document.getElementById('game');
-const status = document.getElementById('status');
-const world = createWorld(createRandom(seed));
-const missions = createMissions(world);
-const renderer = createRenderer(canvas);
-const audio = createAudio();
-// Exposed for headless play-testing (probe the live state from Playwright).
-window.__game = { world, missions };
+// One frame never pushes the world further than a quarter of a second;
+// a hitch just drops time instead of teleporting the simulation.
+const FRAME_CAP = 1 / 4;
+const STILL = { sprint: false, x: 0, y: 0 };
+
+// The shared objects every mode draws from: one world, its missions, a
+// renderer for the canvas, sound, and the live-region announcer.
+const board = document.getElementById('game');
+const liveRegion = document.getElementById('status');
+const sim = createWorld(createRandom(seedValue));
+const story = createMissions(sim);
+const view = createRenderer(board);
+const sound = createAudio();
+
+// Headless probe: the playtest harness reads the live world through this.
+window.__game = { world: sim, missions: story };
+
+function announce(text) {
+  liveRegion.textContent = text;
+}
+
+// --- save slot and best money -------------------------------------------
+// Both live in localStorage. Every access is guarded: with storage off,
+// reads fall back to a fresh start and writes report failure.
 
 function readSave() {
-  try {
-    const raw = window.localStorage.getItem(SAVE_KEY);
-    return raw ? JSON.parse(raw) : null;
-  } catch {
-    return null;
+  let parsed = null;
+  try { // storage throws when it is disabled or full
+    const text = window.localStorage.getItem(SAVE_KEY);
+    parsed = text ? JSON.parse(text) : null;
+  } catch (err) { // unreadable save counts as no save
+    parsed = null;
   }
+  return parsed;
 }
 
 function writeSave() {
-  try {
-    const save = {
-      v: 1,
-      player: world.serialize(),
-      missionIndex: missions.state.index,
-      missionStep: missions.state.stepIndex,
-      finished: missions.state.finished,
-      savedAt: Date.now(),
-    };
-    window.localStorage.setItem(SAVE_KEY, JSON.stringify(save));
-    return true;
-  } catch {
-    return false;
+  let stored = false;
+  try { // storage throws when it is disabled or full
+    const payload = { v: 1, player: sim.serialize(), missionIndex: story.state.index, missionStep: story.state.stepIndex, finished: story.state.finished, savedAt: Date.now() };
+    window.localStorage.setItem(SAVE_KEY, JSON.stringify(payload));
+    stored = true;
+  } catch (err) { // a failed write reports false
+    stored = false;
   }
+  return stored;
 }
 
 function clearSave() {
-  try {
-    window.localStorage.removeItem(SAVE_KEY);
-  } catch { /* storage can be off */ }
+  try { // storage throws when it is disabled
+    const key = SAVE_KEY;
+    window.localStorage.removeItem(key);
+  } catch (err) { // a missing save is a fresh start either way
+  }
 }
 
 function readBest() {
-  try {
-    return Number.parseInt(window.localStorage.getItem(BEST_KEY) ?? '0', 10) || 0;
-  } catch {
-    return 0;
+  let record = 0;
+  try { // storage throws when it is disabled
+    record = Number.parseInt(window.localStorage.getItem(BEST_KEY) ?? '0', 10) || 0;
+  } catch (err) { // no record on file reads as zero
+    record = 0;
+  }
+  return record;
+}
+
+function writeBest(amount) {
+  try { // storage throws when it is disabled
+    window.localStorage.setItem(BEST_KEY, String(amount));
+  } catch (err) { // best money is cosmetic; losing it is not fatal
   }
 }
 
-function saveBest(value) {
-  try {
-    window.localStorage.setItem(BEST_KEY, String(value));
-  } catch { /* storage can be off */ }
-}
-
-function applySave(save) {
-  world.reset();
-  world.deserialize(save.player);
-  if (save.finished) {
-    missions.state.finished = true;
-    missions.state.active = false;
-  } else {
-    missions.startMission(save.missionIndex ?? 0);
-    // Resume mid-mission, not from its first step.
-    missions.state.stepIndex = Math.min(save.missionStep ?? 0, (missions.mission()?.steps.length ?? 1) - 1);
-    missions.state.dialogue = null;
+// Restore a save into the live world, picking the mission back up mid-way
+// instead of restarting it from step one.
+function applySave(slot) {
+  sim.reset();
+  sim.deserialize(slot.player);
+  if (slot.finished) {
+    story.state.finished = true;
+    story.state.active = false;
+  }
+  if (!slot.finished) {
+    story.startMission(slot.missionIndex ?? 0);
+    const legCount = story.mission()?.steps.length ?? 1;
+    story.state.stepIndex = Math.min(slot.missionStep ?? 0, legCount - 1);
+    story.state.dialogue = null;
   }
 }
 
-// ---- headless logic self-test (no rendering, no audio) ----
+// --- headless logic checks ------------------------------------------------
+// World and mission checks only: nothing renders, nothing sounds. Every
+// check is recorded by name on window.__selftest for the capture harness.
+
 function runSelftest() {
-  const checks = [];
-  function check(name, ok) {
-    checks.push({ name, ok: !!ok });
+  const outcomes = [];
+  const note = (label, ok) => {
+    outcomes.push({ name: label, ok: !!ok });
+  };
+
+  const sim = createWorld(createRandom(7));
+  const story = createMissions(sim);
+  const hero = sim.state.player;
+
+  const x0 = hero.x;
+  sim.step(STEP, { x: 1, y: 0, sprint: false }, 0);
+  note('walking moves the player', hero.x > x0);
+  note('city has buildings and roads', sim.state.buildings.length > 20);
+  note('traffic exists', sim.state.cars.some((c) => c.traffic));
+  note('pedestrians exist', sim.state.peds.length >= 10);
+  note('five missions in the story', MISSIONS.length === 5);
+  note('ten hidden stashes in the city', sim.state.pickups.filter((pk) => pk.kind === 'stash').length === 10);
+  const mapNamed = sim.districtAt(300, 300) === 'OLD TOWN'
+    && sim.districtAt(1500, 300) === 'DOWNTOWN'
+    && sim.districtAt(1500, 2300) === 'BEACHFRONT';
+  note('districts name the map', mapNamed);
+
+  // On foot to the Comet, then E to take it.
+  hero.x = 1290;
+  hero.y = 1060;
+  sim.step(STEP, { x: 0, y: 0, sprint: false }, ACTION_INTERACT);
+  note('entering the Comet puts the player in a car', hero.inCar && hero.carId === 'comet');
+  note('stealing the Comet logs the killfeed', sim.state.feed.some((f) => f.text.includes('Comet')));
+  note('stealing a car counts it', sim.state.stats.carsStolen === 1);
+
+  story.startMission(0);
+  note('mission 1 starts', story.state.active && story.mission().id === 'hot-wheels');
+  note('mission counter reads 1/5', story.missionCounter() === 'MISSION 1/5');
+  story.update(STEP, false);
+  story.update(STEP, false);
+  note('reaching and stealing the Comet advances mission 1', story.state.stepIndex === 2);
+
+  // Full throttle should build speed in the Comet.
+  const ride = sim.playerCar();
+  const v0 = Math.abs(ride.speed);
+  for (let n = 0; n < 120; n += 1) sim.step(STEP, { x: 0, y: -1, sprint: false }, 0);
+  note('driving accelerates', Math.abs(ride.speed) > v0 + 50);
+
+  // Wanted: set it straight on the world, then wait for the police.
+  sim.setWanted(2);
+  note('wanted level sets', sim.state.wantedLevel === 2);
+  for (let n = 0; n < 600; n += 1) sim.step(STEP, { x: 0, y: 0, sprint: false }, 0);
+  note('police cars chase at wanted 2', sim.state.cars.some((c) => c.police));
+  note('police on foot chase at wanted 2', sim.state.police.length > 0);
+
+  // With the crime timer spent and every cop far away, heat should fade.
+  sim.setWanted(1);
+  sim.state.crimeTimer = 0;
+  for (const c of sim.state.cars) {
+    if (c.police) {
+      c.x = 100;
+      c.y = 100;
+    }
   }
-  const w = createWorld(createRandom(7));
-  const m = createMissions(w);
-  const p = w.state.player;
-  const x0 = p.x;
-  w.step(STEP, { x: 1, y: 0, sprint: false }, 0);
-  check('walking moves the player', p.x > x0);
-  check('city has buildings and roads', w.state.buildings.length > 20);
-  check('traffic exists', w.state.cars.some((c) => c.traffic));
-  check('pedestrians exist', w.state.peds.length >= 10);
-  check('five missions in the story', MISSIONS.length === 5);
-  check('ten hidden stashes in the city', w.state.pickups.filter((pk) => pk.kind === 'stash').length === 10);
-  check('districts name the map', w.districtAt(300, 300) === 'OLD TOWN' && w.districtAt(1500, 300) === 'DOWNTOWN' && w.districtAt(1500, 2300) === 'BEACHFRONT');
-  // Steal the Comet: walk to it and press E.
-  p.x = 1290;
-  p.y = 1060;
-  w.step(STEP, { x: 0, y: 0, sprint: false }, ACTION_INTERACT);
-  check('entering the Comet puts the player in a car', p.inCar && p.carId === 'comet');
-  check('stealing the Comet logs the killfeed', w.state.feed.some((f) => f.text.includes('Comet')));
-  check('stealing a car counts it', w.state.stats.carsStolen === 1);
-  m.startMission(0);
-  check('mission 1 starts', m.state.active && m.mission().id === 'hot-wheels');
-  check('mission counter reads 1/5', m.missionCounter() === 'MISSION 1/5');
-  m.update(STEP, false);
-  m.update(STEP, false);
-  check('reaching and stealing the Comet advances mission 1', m.state.stepIndex === 2);
-  // Driving accelerates the car.
-  const car = w.playerCar();
-  const speed0 = Math.abs(car.speed);
-  for (let i = 0; i < 120; i += 1) w.step(STEP, { x: 0, y: -1, sprint: false }, 0);
-  check('driving accelerates', Math.abs(car.speed) > speed0 + 50);
-  // Wanted: punching a pedestrian raises it and police arrive.
-  w.setWanted(2);
-  check('wanted level sets', w.state.wantedLevel === 2);
-  for (let i = 0; i < 600; i += 1) w.step(STEP, { x: 0, y: 0, sprint: false }, 0);
-  check('police cars chase at wanted 2', w.state.cars.some((c) => c.police));
-  check('police on foot chase at wanted 2', w.state.police.length > 0);
-  // Wanted decays once the crime timer lapses and no cop is near.
-  w.setWanted(1);
-  w.state.crimeTimer = 0;
-  for (const c of w.state.cars) if (c.police) { c.x = 100; c.y = 100; }
-  for (const c of w.state.police) { c.x = 100; c.y = 100; }
-  p.x = 3000;
-  p.y = 300;
-  const w0 = w.state.wanted;
-  for (let i = 0; i < 600; i += 1) w.step(STEP, { x: 0, y: 0, sprint: false }, 0);
-  check('wanted decays while hidden', w.state.wanted < w0);
-  // Save / load round-trips the player.
-  const saved = w.serialize();
-  saved.money = 4321;
-  const w2 = createWorld(createRandom(7));
-  w2.deserialize(saved);
-  check('save/load round-trips money and position', w2.state.player.money === 4321 && w2.state.player.x === saved.x);
-  // Combat: punching a pedestrian next to the player hurts it and raises heat.
-  const w3 = createWorld(createRandom(9));
-  const ped0 = w3.state.peds[0];
-  ped0.hp = 30; // one punch drops it, which is what raises the wanted level
-  w3.state.player.x = ped0.x - 30;
-  w3.state.player.y = ped0.y;
-  w3.state.player.faceAngle = 0;
-  const pedHp0 = ped0.hp;
-  w3.step(STEP, { x: 0, y: 0, sprint: false }, 8); // ACTION_PUNCH
-  check('punching a pedestrian hurts it', ped0.hp < pedHp0, `hp ${pedHp0}→${ped0.hp}`);
-  check('punching raises the wanted level', w3.state.wantedLevel >= 1, `wanted=${w3.state.wantedLevel}`);
-  check('punching logs the killfeed', w3.state.feed.length > 0);
-  // Two landed punches on a healthy pedestrian draw a star before the
-  // knock-out: heat comes from the assault, not only from the body.
-  const w5 = createWorld(createRandom(13));
-  const ped1 = w5.state.peds[0];
-  w5.state.player.x = ped1.x - 30;
-  w5.state.player.y = ped1.y;
-  w5.state.player.faceAngle = 0;
-  w5.step(STEP, { x: 0, y: 0, sprint: false }, 8); // ACTION_PUNCH
-  w5.state.player.punchTimer = 0;
-  w5.state.player.x = ped1.x - 30;
-  w5.state.player.y = ped1.y;
-  w5.state.player.faceAngle = Math.atan2(ped1.y - w5.state.player.y, ped1.x - w5.state.player.x);
-  w5.step(STEP, { x: 0, y: 0, sprint: false }, 8); // ACTION_PUNCH
-  check('two landed punches draw a wanted star', w5.state.wantedLevel >= 1);
-  // Mission 2: reaching the marina advances it.
-  m.startMission(1);
-  w.state.player.inCar = false;
-  w.state.player.carId = null;
-  w.state.player.x = 2740;
-  w.state.player.y = 2050;
-  m.update(STEP, false);
-  check('marina pickup advances mission 2', m.state.stepIndex === 1);
-  // Mission 5: Clean Slate starts at wanted 4 with the airstrip as target.
-  m.startMission(4);
-  check('mission 5 starts at wanted 4', m.mission().id === 'clean-slate' && w.state.wantedLevel === 4);
-  check('mission 5 target is the airstrip', m.marker() && m.marker().label === 'Airstrip');
-  w.state.player.x = 2960;
-  w.state.player.y = 2220;
-  m.update(STEP, false);
-  check('reaching the airstrip advances mission 5', m.state.stepIndex === 1);
-  // A hidden stash pays $150 and counts toward the stash total.
-  const w4 = createWorld(createRandom(11));
-  const stash = w4.state.pickups.find((pk) => pk.kind === 'stash');
-  const money0 = w4.state.player.money;
-  w4.state.player.x = stash.x;
-  w4.state.player.y = stash.y;
-  const stashEvents = w4.step(STEP, { x: 0, y: 0, sprint: false }, 0);
-  check('a hidden stash pays out', (stashEvents & EVENT_STASH) !== 0 && w4.state.player.money === money0 + 150);
-  check('stash count rises', w4.state.stats.stashesFound === 1);
-  window.__selftest = { pass: checks.every((c) => c.ok), checks };
+  for (const c of sim.state.police) {
+    c.x = 100;
+    c.y = 100;
+  }
+  hero.x = 3000;
+  hero.y = 300;
+  const heatBefore = sim.state.wanted;
+  for (let n = 0; n < 600; n += 1) sim.step(STEP, { x: 0, y: 0, sprint: false }, 0);
+  note('wanted decays while hidden', sim.state.wanted < heatBefore);
+
+  // Serialise the world, load it into a fresh one, compare.
+  const snap = sim.serialize();
+  snap.money = 4321;
+  const sim2 = createWorld(createRandom(7));
+  sim2.deserialize(snap);
+  const roundTrips = sim2.state.player.money === 4321 && sim2.state.player.x === snap.x;
+  note('save/load round-trips money and position', roundTrips);
+
+  // Fight check: one punch at a weakened pedestrian standing nearby.
+  const sim3 = createWorld(createRandom(9));
+  const mark = sim3.state.peds[0];
+  mark.hp = 30; // a single punch drops this one, which is what draws heat
+  sim3.state.player.x = mark.x - 30;
+  sim3.state.player.y = mark.y;
+  sim3.state.player.faceAngle = 0;
+  const hp0 = mark.hp;
+  sim3.step(STEP, { x: 0, y: 0, sprint: false }, ACTION_PUNCH);
+  note('punching a pedestrian hurts it', mark.hp < hp0);
+  note('punching raises the wanted level', sim3.state.wantedLevel >= 1);
+  note('punching logs the killfeed', sim3.state.feed.length > 0);
+
+  // Two solid punches on a healthy pedestrian should already earn a star:
+  // the assault itself draws heat, not just the knock-out.
+  const sim5 = createWorld(createRandom(13));
+  const mark2 = sim5.state.peds[0];
+  const swing = () => {
+    sim5.state.player.x = mark2.x - 30;
+    sim5.state.player.y = mark2.y;
+    sim5.state.player.faceAngle = Math.atan2(mark2.y - sim5.state.player.y, mark2.x - sim5.state.player.x);
+    sim5.step(STEP, { x: 0, y: 0, sprint: false }, ACTION_PUNCH);
+  };
+  swing();
+  sim5.state.player.punchTimer = 0;
+  swing();
+  note('two landed punches draw a wanted star', sim5.state.wantedLevel >= 1);
+
+  // Mission 2 should advance once the hero reaches the marina.
+  story.startMission(1);
+  sim.state.player.inCar = false;
+  sim.state.player.carId = null;
+  sim.state.player.x = 2740;
+  sim.state.player.y = 2050;
+  story.update(STEP, false);
+  note('marina pickup advances mission 2', story.state.stepIndex === 1);
+
+  // Mission 5 opens at wanted 4 with the airstrip as its target.
+  story.startMission(4);
+  note('mission 5 starts at wanted 4', story.mission().id === 'clean-slate' && sim.state.wantedLevel === 4);
+  note('mission 5 target is the airstrip', story.marker() && story.marker().label === 'Airstrip');
+  sim.state.player.x = 2960;
+  sim.state.player.y = 2220;
+  story.update(STEP, false);
+  note('reaching the airstrip advances mission 5', story.state.stepIndex === 1);
+
+  // Walking over a hidden stash should pay $150 and count as found.
+  const sim4 = createWorld(createRandom(11));
+  const cache = sim4.state.pickups.find((pk) => pk.kind === 'stash');
+  const cash0 = sim4.state.player.money;
+  sim4.state.player.x = cache.x;
+  sim4.state.player.y = cache.y;
+  const evts = sim4.step(STEP, { x: 0, y: 0, sprint: false }, 0);
+  note('a hidden stash pays out', (evts & EVENT_STASH) !== 0 && sim4.state.player.money === cash0 + 150);
+  note('stash count rises', sim4.state.stats.stashesFound === 1);
+
+  window.__selftest = { checks: outcomes, pass: outcomes.every((c) => c.ok) };
 }
 
-function runShot(name) {
-  const scene = stageShot(name, world, missions);
-  let painted = 0;
-  function paint() {
-    renderer.draw(world.state, scene.screen, missions, { best: scene.best, hasSave: scene.hasSave, muted: false });
-    painted += 1;
-    if (painted < 2) requestAnimationFrame(paint);
-    else window.__shotReady = true;
-  }
-  requestAnimationFrame(paint);
+// --- staged frames for screenshots ----------------------------------------
+// Stage the named scene, paint it twice so the canvas settles, then raise
+// the flag the capture harness waits on.
+
+function paintShot(name) {
+  const scene = stageShot(name, sim, story);
+  let done = 0;
+  const repaint = () => {
+    view.draw(sim.state, scene.screen, story, { best: scene.best, hasSave: scene.hasSave, muted: false });
+    done += 1;
+    if (done >= 2) {
+      window.__shotReady = true;
+    } else {
+      requestAnimationFrame(repaint);
+    }
+  };
+  requestAnimationFrame(repaint);
 }
+
+// --- playing the game ------------------------------------------------------
+// One rAF loop, fixed-step simulation, five screens, and the save slot.
 
 function runGame() {
-  const input = createInput(canvas);
-  let screen = SCREEN_TITLE;
-  let best = readBest();
-  let save = readSave();
-  let accumulator = 0;
-  let last = performance.now();
+  const keys = createInput(board);
+  let mode = SCREEN_TITLE;
+  let bestMoney = readBest();
+  let leftover = 0;
+  let prevNow = performance.now();
+  // Punch / interact for this frame's step, taken once from the
+  // input snapshot and spent by the first step that runs.
+  let pendingActions = 0;
+  // E is held down (vault cracking); N, S and Q are one-shot menu keys.
   let eHeld = false;
-  let gameActions = 0;
   let nPressed = false;
   let sPressed = false;
   let qPressed = false;
 
-  window.addEventListener('keydown', (event) => {
-    if (event.code === 'KeyE') eHeld = true;
-    if (event.code === 'KeyN' && !event.repeat) nPressed = true;
-    if (event.code === 'KeyS' && !event.repeat) sPressed = true;
-    if (event.code === 'KeyQ' && !event.repeat) qPressed = true;
-  });
-  window.addEventListener('keyup', (event) => {
+  const onKeyDown = (event) => {
+    const code = event.code;
+    if (code === 'KeyE') eHeld = true;
+    else if (code === 'KeyN' && !event.repeat) nPressed = true;
+    else if (code === 'KeyS' && !event.repeat) sPressed = true;
+    else if (code === 'KeyQ' && !event.repeat) qPressed = true;
+  };
+  const onKeyUp = (event) => {
     if (event.code === 'KeyE') eHeld = false;
-  });
+  };
+  window.addEventListener('keydown', onKeyDown);
+  window.addEventListener('keyup', onKeyUp);
 
-  function announce(message) {
-    status.textContent = message;
-  }
-
-  function startNewGame() {
+  function startFresh() {
     clearSave();
-    world.reset();
-    missions.startMission(0);
-    screen = SCREEN_PLAY;
-    audio.unlock();
+    sim.reset();
+    story.startMission(0);
+    mode = SCREEN_PLAY;
+    sound.unlock();
     announce('New game. Mission 1: Hot Wheels. Steal the yellow Comet on Palma Avenue.');
   }
 
-  function continueGame() {
-    save = readSave();
-    if (!save) {
-      startNewGame();
-      return;
+  function resumeSave() {
+    const slot = readSave();
+    if (slot) {
+      applySave(slot);
+      mode = SCREEN_PLAY;
+      sound.unlock();
+      announce('Continuing. Mission ' + (story.state.index + 1) + '. ' + story.currentObjective());
     }
-    applySave(save);
-    screen = SCREEN_PLAY;
-    audio.unlock();
-    announce(`Continuing. Mission ${missions.state.index + 1}. ${missions.currentObjective()}`);
+    if (!slot) startFresh();
   }
 
-  function missionFailed(kind) {
-    const p = world.state.player;
-    p.money = Math.max(0, p.money - MONEY.hospitalFee);
-    if (p.money > best) {
-      best = p.money;
-      saveBest(best);
+  // Wasted or busted: hospital fee or bail, keep the money, restart the
+  // current mission from its first step, and save straight away.
+  function handleDefeat() {
+    const hero = sim.state.player;
+    const kept = Math.max(0, hero.money - MONEY.hospitalFee);
+    hero.money = kept;
+    if (kept > bestMoney) {
+      bestMoney = kept;
+      writeBest(bestMoney);
     }
-    // The current mission restarts from its first step.
-    const idx = missions.state.index;
-    world.reset();
-    world.state.player.money = p.money;
-    world.state.player.hp = 100;
-    missions.startMission(idx);
-    missions.state.dialogue = null;
+    const missionIdx = story.state.index;
+    sim.reset();
+    sim.state.player.money = kept;
+    sim.state.player.hp = 100;
+    story.startMission(missionIdx);
+    story.state.dialogue = null;
     writeSave();
   }
 
-  function handleWorldEvents(events) {
-    if (events & EVENT_PUNCH) audio.punch();
-    if (events & EVENT_PICKUP) audio.pickup();
-    if (events & EVENT_STASH) audio.stash();
-    if (events & EVENT_CRASH) audio.crash();
-    if (events & EVENT_STEAL) {
-      audio.steal();
+  function onWorldEvents(flags) {
+    if (flags & EVENT_PUNCH) sound.punch();
+    if (flags & EVENT_PICKUP) sound.pickup();
+    if (flags & EVENT_STASH) sound.stash();
+    if (flags & EVENT_CRASH) sound.crash();
+    if (flags & EVENT_STEAL) {
+      sound.steal();
       announce('Car stolen. The cops noticed.');
     }
-    if (events & EVENT_WANTED_UP) {
-      audio.heat();
-      announce(`Wanted level ${world.state.wantedLevel}. Lose the police!`);
+    if (flags & EVENT_WANTED_UP) {
+      sound.heat();
+      announce('Wanted level ' + sim.state.wantedLevel + '. Lose the police!');
     }
-    if (events & EVENT_WASTED) {
-      audio.fail();
-      missionFailed('wasted');
-      screen = SCREEN_OVER;
-      announce('Wasted. Hospital fee $100. The mission restarts.');
-    } else if (events & EVENT_BUSTED) {
-      audio.busted();
-      missionFailed('busted');
-      screen = SCREEN_BUSTED;
-      announce('Busted. Bail $100. The mission restarts.');
+    if (flags & EVENT_WASTED) {
+      sound.fail();
+      handleDefeat();
+      mode = SCREEN_OVER;
+      announce('Wasted. Hospital fee $' + MONEY.hospitalFee + '. The mission restarts.');
+    } else if (flags & EVENT_BUSTED) {
+      sound.busted();
+      handleDefeat();
+      mode = SCREEN_BUSTED;
+      announce('Busted. Bail $' + MONEY.hospitalFee + '. The mission restarts.');
     }
   }
 
-  function handleMissionEvents(events) {
-    for (const e of events) {
-      if (e.type === 'mission-complete') {
-        audio.mission();
+  function onMissionEvents(list) {
+    for (const ev of list) {
+      if (ev.type === 'mission-complete') {
+        sound.mission();
         writeSave();
-        announce(`Mission complete. +$${e.reward}.`);
-      } else if (e.type === 'mission-start') {
-        announce(`New mission: ${missions.mission().title}.`);
-      } else if (e.type === 'step-done') {
-        audio.pickup();
-      } else if (e.type === 'story-complete') {
+        announce('Mission complete. +$' + ev.reward + '.');
+      } else if (ev.type === 'mission-start') {
+        announce('New mission: ' + story.mission().title + '.');
+      } else if (ev.type === 'step-done') {
+        sound.pickup();
+      } else if (ev.type === 'story-complete') {
         writeSave();
         announce('Story complete. Solmar Bay is yours.');
       }
     }
   }
 
-  function handleActions(actions) {
-    if (actions & ACTION_MUTE) {
-      const muted = audio.toggleMute();
+  // One-shot menu keys, routed by whichever screen is showing.
+  function onActions(flags) {
+    if (flags & ACTION_MUTE) {
+      const muted = sound.toggleMute();
       announce(muted ? 'Sound off.' : 'Sound on.');
     }
-    if (screen === SCREEN_TITLE) {
+    if (mode === SCREEN_TITLE) {
       if (nPressed) {
         nPressed = false;
-        startNewGame();
-        return;
+        startFresh();
+      } else if (flags & ACTION_CONFIRM) {
+        sound.unlock();
+        if (readSave()) resumeSave();
+        else startFresh();
       }
-      if (actions & ACTION_CONFIRM) {
-        audio.unlock();
-        if (readSave()) continueGame();
-        else startNewGame();
-      }
-      return;
-    }
-    if (screen === SCREEN_OVER || screen === SCREEN_BUSTED) {
-      if (actions & ACTION_CONFIRM) {
-        screen = SCREEN_PLAY;
+    } else if (mode === SCREEN_OVER || mode === SCREEN_BUSTED) {
+      if (flags & ACTION_CONFIRM) {
+        mode = SCREEN_PLAY;
         announce('Back on the streets.');
       }
-      return;
-    }
-    if (screen === SCREEN_PAUSED) {
+    } else if (mode === SCREEN_PAUSED) {
       if (sPressed) {
         sPressed = false;
-        const ok = writeSave();
-        announce(ok ? 'Game saved.' : 'Save failed — storage is off.');
-        return;
-      }
-      if (qPressed) {
+        const saved = writeSave();
+        announce(saved ? 'Game saved.' : 'Save failed — storage is off.');
+      } else if (qPressed) {
         qPressed = false;
-        screen = SCREEN_TITLE;
-        save = readSave();
+        mode = SCREEN_TITLE;
         announce('SOLMAR HEAT. Press Enter to continue or N for a new game.');
-        return;
-      }
-      if (actions & (ACTION_PAUSE | ACTION_CONFIRM)) {
-        screen = SCREEN_PLAY;
+      } else if (flags & (ACTION_PAUSE | ACTION_CONFIRM)) {
+        mode = SCREEN_PLAY;
         announce('Playing.');
       }
-      return;
-    }
-    // SCREEN_PLAY
-    if (actions & ACTION_PAUSE) {
-      screen = SCREEN_PAUSED;
+    } else if (flags & ACTION_PAUSE) {
+      mode = SCREEN_PAUSED;
       announce('Paused. S saves, Q quits to title.');
-      return;
-    }
-    if (actions & ACTION_CONFIRM && missions.state.dialogue) {
-      missions.advanceDialogue();
+    } else if (flags & ACTION_CONFIRM && story.state.dialogue) {
+      story.advanceDialogue();
     }
   }
 
-  function step() {
-    if (screen === SCREEN_TITLE) {
-      world.step(STEP, { x: 0, y: 0, sprint: false }, 0);
-      return;
+  // A single fixed slice of the live game. The title screen lets the
+  // city idle behind the menu; other screens only step while playing.
+  function tick() {
+    if (mode === SCREEN_TITLE) {
+      sim.step(STEP, STILL, 0);
+    } else if (mode === SCREEN_PLAY) {
+      const move = keys.move();
+      const flags = sim.step(STEP, move, pendingActions);
+      pendingActions = 0;
+      onWorldEvents(flags);
+      onMissionEvents(story.update(STEP, eHeld));
+      const ride = sim.playerCar();
+      const pace = sim.state.player.inCar ? Math.abs((ride ? ride.speed : 0) / 560) : 0;
+      sound.setDriving(pace);
+      sound.setSiren(sim.state.wantedLevel > 0);
     }
-    if (screen !== SCREEN_PLAY) return;
-    const move = input.move();
-    // Punch / interact from this frame's single action snapshot; consumed once.
-    const events = world.step(STEP, move, gameActions);
-    gameActions = 0;
-    handleWorldEvents(events);
-    const mEvents = missions.update(STEP, eHeld);
-    handleMissionEvents(mEvents);
-    audio.setDriving(world.state.player.inCar ? Math.abs((world.playerCar()?.speed ?? 0) / 560) : 0);
-    audio.setSiren(world.state.wantedLevel > 0);
   }
 
-  function frame(now) {
-    requestAnimationFrame(frame);
-    accumulator += Math.min((now - last) / 1000, MAX_FRAME);
-    last = now;
-    // Actions are taken once per frame: menus use confirm/pause, the world
-    // uses punch/interact from the same snapshot.
-    const actions = input.takeActions();
-    gameActions = actions & (ACTION_PUNCH | ACTION_INTERACT);
-    handleActions(actions);
-    while (accumulator >= STEP && (screen === SCREEN_TITLE || screen === SCREEN_PLAY)) {
-      step();
-      accumulator -= STEP;
-      if (screen !== SCREEN_TITLE && screen !== SCREEN_PLAY) break;
+  function loop(now) {
+    requestAnimationFrame(loop);
+    leftover += Math.min((now - prevNow) / 1000, FRAME_CAP);
+    prevNow = now;
+    // Actions are taken once per frame: menus use confirm and pause, the
+    // world uses punch and interact from the same snapshot.
+    const flags = keys.takeActions();
+    pendingActions = flags & (ACTION_PUNCH | ACTION_INTERACT);
+    onActions(flags);
+    while (leftover >= STEP && (mode === SCREEN_TITLE || mode === SCREEN_PLAY)) {
+      tick();
+      leftover -= STEP;
     }
-    if (screen !== SCREEN_TITLE && screen !== SCREEN_PLAY) accumulator = 0;
-    renderer.draw(world.state, screen, missions, { best, hasSave: !!readSave(), muted: audio.isMuted() });
-    // One-shot key flags are consumed here so a press between frames is not lost.
+    if (mode !== SCREEN_TITLE && mode !== SCREEN_PLAY) leftover = 0;
+    view.draw(sim.state, mode, story, {
+      best: bestMoney,
+      hasSave: !!readSave(),
+      muted: sound.isMuted(),
+    });
+    // One-shot key flags are cleared here so a press between frames is kept.
     nPressed = false;
     sPressed = false;
     qPressed = false;
   }
 
-  document.addEventListener('visibilitychange', () => {
-    if (document.hidden && screen === SCREEN_PLAY) {
-      screen = SCREEN_PAUSED;
+  const onHidden = () => {
+    if (document.hidden && mode === SCREEN_PLAY) {
+      mode = SCREEN_PAUSED;
       announce('Paused.');
     }
-  });
+  };
+  document.addEventListener('visibilitychange', onHidden);
 
   announce('SOLMAR HEAT. Press Enter to start.');
-  requestAnimationFrame(frame);
+  requestAnimationFrame(loop);
 }
 
-if (selftest) runSelftest();
-else if (shot) runShot(shot);
+// --- start here ------------------------------------------------------------
+// Self-test first, then a staged shot, then the playable game.
+if (selftestMode) runSelftest();
+else if (shot) paintShot(shot);
 else runGame();
