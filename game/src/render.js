@@ -1,8 +1,10 @@
 // Drawing only for SOLMAR HEAT: the sun-soaked city, its cars and people, the
-// HUD (health, money, wanted stars, objective, speed, minimap) and the screens
+// HUD (health, money, stashes, wanted stars, objective, mission counter,
+// speed, minimap, district name, killfeed) and the screens
 // (title, pause, wasted, busted). The camera shows a 1280x720 window of the
 // 3200x2400 world, scaled to fit the browser window.
-import { BEACH_Y, CAR, FONT, FONT_DISPLAY, PALETTE, PLAYER, POLICE, ROADS_X, ROADS_Y, ROAD_W, VIEW, WORLD } from './config.js';
+import { AIRSTRIP, BEACH_Y, CAR, FONT, FONT_DISPLAY, PALETTE, PLAYER, POLICE, ROADS_X, ROADS_Y, ROAD_W, STASHES, VIEW, WORLD } from './config.js';
+import { districtAt } from './world.js';
 
 export const SCREEN_TITLE = 'title';
 export const SCREEN_PLAY = 'play';
@@ -68,6 +70,16 @@ export function createRenderer(canvas) {
       ctx.fillStyle = PALETTE.sand;
       ctx.fillRect(0, BEACH_Y - camY, VIEW.width, 90);
     }
+    // Beachfront airstrip: a dark runway on the sand, with a dashed centre
+    // line — the final mission's escape strip.
+    const strip = state.airstrip;
+    ctx.fillStyle = PALETTE.runway;
+    ctx.fillRect(strip.x - camX, strip.y - camY, strip.w, strip.h);
+    ctx.fillStyle = PALETTE.runwayLine;
+    for (let x = strip.x + 12; x < strip.x + strip.w - 12; x += 28) {
+      ctx.fillRect(x - camX, strip.y + strip.h / 2 - 2 - camY, 16, 4);
+    }
+    text('AIRSTRIP', strip.x + strip.w / 2 - camX, strip.y + strip.h + 18 - camY, 12, '#5a4632', 'center');
     // Park.
     const park = state.park;
     ctx.fillStyle = PALETTE.grass;
@@ -312,6 +324,20 @@ export function createRenderer(canvas) {
         ctx.fill();
         ctx.fillStyle = '#a5f2b0';
         text('$', px, py + 5, 13, '#a5f2b0', 'center');
+      } else if (pk.kind === 'stash') {
+        // A hidden stash: a green duffel with a gold clasp, bigger than cash.
+        ctx.fillStyle = '#1e5d32';
+        rr(px - 15, py - 10, 30, 20, 6);
+        ctx.fill();
+        ctx.strokeStyle = PALETTE.gold;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(px - 15, py);
+        ctx.lineTo(px + 15, py);
+        ctx.stroke();
+        ctx.fillStyle = PALETTE.gold;
+        ctx.fillRect(px - 3, py - 4, 6, 8);
+        text('$', px, py - 14, 12, PALETTE.gold, 'center');
       } else {
         ctx.fillStyle = '#f5f1e6';
         rr(px - 11, py - 11, 22, 22, 5);
@@ -336,9 +362,9 @@ export function createRenderer(canvas) {
   function drawHud(state, missions, time, muted) {
     const p = state.player;
     ctx.textBaseline = 'alphabetic';
-    // Top-left: health + money + objective.
+    // Top-left: health + money + stash count.
     ctx.fillStyle = PALETTE.hudPanel;
-    rr(14, 12, 330, 92, 10);
+    rr(14, 12, 330, 112, 10);
     ctx.fill();
     text('RAY “VELA” CRUZ', 28, 38, 15, PALETTE.hudText, 'left');
     ctx.fillStyle = '#222';
@@ -350,6 +376,7 @@ export function createRenderer(canvas) {
     text(`${Math.ceil(p.hp)}`, 216, 59, 14, PALETTE.hudText, 'left');
     text(`$${p.money.toLocaleString('en-US')}`, 28, 88, 20, PALETTE.money, 'left');
     if (state.packageCarried) text('📦 PACKAGE', 150, 88, 15, PALETTE.gold, 'left');
+    text(`STASH ${state.stats.stashesFound}/${STASHES.count}`, 28, 110, 13, PALETTE.stash, 'left');
     // Wanted stars, top centre.
     const stars = state.wantedLevel;
     ctx.fillStyle = PALETTE.hudPanel;
@@ -359,14 +386,14 @@ export function createRenderer(canvas) {
       const flashing = stars > 0 && Math.floor(time * 3) % 2 === 0;
       text('★', VIEW.width / 2 - 88 + i * 40, 44, 28, i < stars ? (flashing ? '#ffd60a' : '#ff9d00') : 'rgba(245,241,230,0.25)', 'left');
     }
-    if (state.wantedLevel > 0) text('WANTED', VIEW.width / 2, 74, 12, PALETTE.danger, 'center');
-    // Objective banner under the stars.
-    const objective = missions.currentObjective();
+    // Objective banner under the stars, with the mission counter.
+    const counter = missions.missionCounter();
+    const objective = (counter ? counter + ' — ' : '') + missions.currentObjective();
     ctx.fillStyle = PALETTE.hudPanel;
-    const ow = Math.min(560, 40 + objective.length * 8.4);
-    rr(VIEW.width / 2 - ow / 2, 82, ow, 34, 8);
+    const ow = Math.min(680, 40 + objective.length * 8.4);
+    rr(VIEW.width / 2 - ow / 2, 88, ow, 34, 8);
     ctx.fill();
-    text('◆ ' + objective, VIEW.width / 2, 105, 15, PALETTE.hudText, 'center');
+    text('◆ ' + objective, VIEW.width / 2, 111, 15, PALETTE.hudText, 'center');
     // Vault progress.
     if (state.vaultProgress > 0) {
       ctx.fillStyle = PALETTE.hudPanel;
@@ -381,8 +408,16 @@ export function createRenderer(canvas) {
     if (state.arrestProgress > 0.2) {
       text('⚠ THEY ARE GRABBING YOU — MOVE!', VIEW.width / 2, 190, 16, PALETTE.danger, 'center');
     }
-    // Minimap, top right.
+    // Minimap, top right. Its label under it names the district Ray is in.
     drawMinimap(state, missions);
+    // Killfeed under the minimap: newest first, fading out.
+    const feed = state.feed;
+    for (let i = 0; i < feed.length; i += 1) {
+      const entry = feed[i];
+      ctx.globalAlpha = Math.max(0.25, Math.min(1, entry.ttl / 2));
+      text(entry.text, VIEW.width - 14, 12 + 142 + 42 + i * 20, 13, PALETTE.feed, 'right');
+    }
+    ctx.globalAlpha = 1;
     // Speed, bottom right, while driving.
     if (p.inCar) {
       const car = state.cars.find((c) => c.id === p.carId);
@@ -441,6 +476,9 @@ export function createRenderer(canvas) {
     for (const ry of ROADS_Y) ctx.fillRect(mx, my + ry * sy, mw, 2);
     ctx.fillStyle = '#c96f4a';
     for (const b of state.buildings) ctx.fillRect(mx + b.x * sx, my + b.y * sy, Math.max(1, b.w * sx), Math.max(1, b.h * sy));
+    // The airstrip shows on the minimap too.
+    ctx.fillStyle = PALETTE.runway;
+    ctx.fillRect(mx + AIRSTRIP.x * sx, my + AIRSTRIP.y * sy, Math.max(2, AIRSTRIP.w * sx), Math.max(2, AIRSTRIP.h * sy));
     const marker = missions.marker();
     if (marker) {
       ctx.fillStyle = PALETTE.marker;
@@ -465,7 +503,8 @@ export function createRenderer(canvas) {
     ctx.beginPath();
     ctx.arc(mx + p.x * sx, my + p.y * sy, 2.5, 0, Math.PI * 2);
     ctx.fill();
-    text('SOLMAR BAY', mx + mw / 2, my + mh + 18, 11, PALETTE.hudMuted, 'center');
+    // The label under the minimap is the district Ray is standing in.
+    text(districtAt(p.x, p.y), mx + mw / 2, my + mh + 18, 11, PALETTE.district, 'center');
   }
 
   // ---------- screens ----------
@@ -489,6 +528,7 @@ export function createRenderer(canvas) {
     drawPanel('SOLMAR HEAT', [
       'An open-world crime story in Solmar Bay',
       'Steal cars. Outrun the law. Pull off the Big Score.',
+      '5 missions · 6 districts · 10 hidden stashes · 32 locals · 20 traffic cars',
       hasSave ? 'A saved game is waiting for you.' : 'No save yet — a new story begins.',
       best > 0 ? `Best haul so far: $${best.toLocaleString('en-US')}` : '',
     ].filter((l) => l !== ''), hasSave ? 'Enter — Continue · N — New game' : 'Enter or click — Start a new game');
@@ -558,7 +598,7 @@ export function createRenderer(canvas) {
       ctx.fillStyle = 'rgba(8,14,20,0.55)';
       ctx.fillRect(0, 0, VIEW.width, VIEW.height);
       drawPanel('Paused', [
-        `Money $${p.money.toLocaleString('en-US')} · Missions done ${state.stats.missionsDone} · Cars stolen ${state.stats.carsStolen}`,
+        `Money $${p.money.toLocaleString('en-US')} · Missions done ${state.stats.missionsDone} · Cars stolen ${state.stats.carsStolen} · Stashes ${state.stats.stashesFound}/${STASHES.count}`,
         'Your progress saves automatically after every mission.',
         'S — save now · P — resume · Q — quit to title',
       ], 'Press P to resume');

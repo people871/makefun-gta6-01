@@ -1,6 +1,7 @@
 // Synthesized sound and music for SOLMAR HEAT — WebAudio only, no audio files.
 // A laid-back synthwave-ish loop (bass + pad chords + a hats tick) runs under
-// play, plus one-shot effects: punch, pickup, crash, siren, mission jingle.
+// play, plus one-shot effects: punch, pickup, crash, siren, stash chime,
+// a wanted-level sting, and the mission jingle.
 // Audio starts only after a user gesture (the browser requires it); until then
 // every call is a safe no-op.
 export function createAudio() {
@@ -154,6 +155,18 @@ export function createAudio() {
     cash() {
       blip(660, 0.1, 'triangle', 0.3);
       if (ctx) note(990, ctx.currentTime + 0.08, 0.16, 'triangle', 0.3, master);
+    },
+    /** A hidden stash: a rising three-note chime, brighter than plain cash. */
+    stash() {
+      if (!ensure()) return;
+      const now = ctx.currentTime;
+      [659.25, 830.61, 1046.5].forEach((f, i) => note(f, now + i * 0.08, 0.25, 'triangle', 0.3, master));
+    },
+    /** Wanted level rose: two low brass-ish stabs. */
+    heat() {
+      if (!ensure()) return;
+      const now = ctx.currentTime;
+      [196.0, 155.56].forEach((f, i) => note(f, now + i * 0.13, 0.22, 'sawtooth', 0.25, master));
     },
     steal() {
       blip(220, 0.15, 'square', 0.25);

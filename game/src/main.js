@@ -8,8 +8,8 @@
 // sets window.__selftest.
 import { BEST_KEY, MONEY, SAVE_KEY, STEP } from './config.js';
 import { createRandom } from './random.js';
-import { createWorld, EVENT_BUSTED, EVENT_CRASH, EVENT_PICKUP, EVENT_PUNCH, EVENT_STEAL, EVENT_WASTED, EVENT_WANTED_UP } from './world.js';
-import { createMissions } from './missions.js';
+import { createWorld, EVENT_BUSTED, EVENT_CRASH, EVENT_PICKUP, EVENT_PUNCH, EVENT_STASH, EVENT_STEAL, EVENT_WASTED, EVENT_WANTED_UP } from './world.js';
+import { createMissions, MISSIONS } from './missions.js';
 import { createAudio } from './audio.js';
 import { ACTION_CONFIRM, ACTION_INTERACT, ACTION_MUTE, ACTION_PAUSE, ACTION_PUNCH, createInput } from './input.js';
 import { createRenderer, SCREEN_BUSTED, SCREEN_OVER, SCREEN_PAUSED, SCREEN_PLAY, SCREEN_TITLE } from './render.js';
@@ -107,13 +107,19 @@ function runSelftest() {
   check('city has buildings and roads', w.state.buildings.length > 20);
   check('traffic exists', w.state.cars.some((c) => c.traffic));
   check('pedestrians exist', w.state.peds.length >= 10);
+  check('five missions in the story', MISSIONS.length === 5);
+  check('ten hidden stashes in the city', w.state.pickups.filter((pk) => pk.kind === 'stash').length === 10);
+  check('districts name the map', w.districtAt(300, 300) === 'OLD TOWN' && w.districtAt(1500, 300) === 'DOWNTOWN' && w.districtAt(1500, 2300) === 'BEACHFRONT');
   // Steal the Comet: walk to it and press E.
   p.x = 1290;
   p.y = 1060;
   w.step(STEP, { x: 0, y: 0, sprint: false }, ACTION_INTERACT);
   check('entering the Comet puts the player in a car', p.inCar && p.carId === 'comet');
+  check('stealing the Comet logs the killfeed', w.state.feed.some((f) => f.text.includes('Comet')));
+  check('stealing a car counts it', w.state.stats.carsStolen === 1);
   m.startMission(0);
   check('mission 1 starts', m.state.active && m.mission().id === 'hot-wheels');
+  check('mission counter reads 1/5', m.missionCounter() === 'MISSION 1/5');
   m.update(STEP, false);
   m.update(STEP, false);
   check('reaching and stealing the Comet advances mission 1', m.state.stepIndex === 2);
@@ -155,6 +161,21 @@ function runSelftest() {
   w3.step(STEP, { x: 0, y: 0, sprint: false }, 8); // ACTION_PUNCH
   check('punching a pedestrian hurts it', ped0.hp < pedHp0, `hp ${pedHp0}→${ped0.hp}`);
   check('punching raises the wanted level', w3.state.wantedLevel >= 1, `wanted=${w3.state.wantedLevel}`);
+  check('punching logs the killfeed', w3.state.feed.length > 0);
+  // Two landed punches on a healthy pedestrian draw a star before the
+  // knock-out: heat comes from the assault, not only from the body.
+  const w5 = createWorld(createRandom(13));
+  const ped1 = w5.state.peds[0];
+  w5.state.player.x = ped1.x - 30;
+  w5.state.player.y = ped1.y;
+  w5.state.player.faceAngle = 0;
+  w5.step(STEP, { x: 0, y: 0, sprint: false }, 8); // ACTION_PUNCH
+  w5.state.player.punchTimer = 0;
+  w5.state.player.x = ped1.x - 30;
+  w5.state.player.y = ped1.y;
+  w5.state.player.faceAngle = Math.atan2(ped1.y - w5.state.player.y, ped1.x - w5.state.player.x);
+  w5.step(STEP, { x: 0, y: 0, sprint: false }, 8); // ACTION_PUNCH
+  check('two landed punches draw a wanted star', w5.state.wantedLevel >= 1);
   // Mission 2: reaching the marina advances it.
   m.startMission(1);
   w.state.player.inCar = false;
@@ -163,6 +184,23 @@ function runSelftest() {
   w.state.player.y = 2050;
   m.update(STEP, false);
   check('marina pickup advances mission 2', m.state.stepIndex === 1);
+  // Mission 5: Clean Slate starts at wanted 4 with the airstrip as target.
+  m.startMission(4);
+  check('mission 5 starts at wanted 4', m.mission().id === 'clean-slate' && w.state.wantedLevel === 4);
+  check('mission 5 target is the airstrip', m.marker() && m.marker().label === 'Airstrip');
+  w.state.player.x = 2960;
+  w.state.player.y = 2220;
+  m.update(STEP, false);
+  check('reaching the airstrip advances mission 5', m.state.stepIndex === 1);
+  // A hidden stash pays $150 and counts toward the stash total.
+  const w4 = createWorld(createRandom(11));
+  const stash = w4.state.pickups.find((pk) => pk.kind === 'stash');
+  const money0 = w4.state.player.money;
+  w4.state.player.x = stash.x;
+  w4.state.player.y = stash.y;
+  const stashEvents = w4.step(STEP, { x: 0, y: 0, sprint: false }, 0);
+  check('a hidden stash pays out', (stashEvents & EVENT_STASH) !== 0 && w4.state.player.money === money0 + 150);
+  check('stash count rises', w4.state.stats.stashesFound === 1);
   window.__selftest = { pass: checks.every((c) => c.ok), checks };
 }
 
@@ -246,12 +284,16 @@ function runGame() {
   function handleWorldEvents(events) {
     if (events & EVENT_PUNCH) audio.punch();
     if (events & EVENT_PICKUP) audio.pickup();
+    if (events & EVENT_STASH) audio.stash();
     if (events & EVENT_CRASH) audio.crash();
     if (events & EVENT_STEAL) {
       audio.steal();
       announce('Car stolen. The cops noticed.');
     }
-    if (events & EVENT_WANTED_UP) announce(`Wanted level ${world.state.wantedLevel}. Lose the police!`);
+    if (events & EVENT_WANTED_UP) {
+      audio.heat();
+      announce(`Wanted level ${world.state.wantedLevel}. Lose the police!`);
+    }
     if (events & EVENT_WASTED) {
       audio.fail();
       missionFailed('wasted');

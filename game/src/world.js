@@ -4,10 +4,10 @@
 // flags, so the caller (main.js) can play sounds and announce without the world
 // knowing about screens or audio.
 import {
-  BEACH_Y, CAR, MONEY, PALETTE, PEDS, PLAYER, POLICE, ROADS_X, ROADS_Y, ROAD_W,
-  TRAFFIC, WANTED, WORLD,
+  AIRSTRIP, BEACH_Y, CAR, DISTRICTS, KILLFEED, MONEY, PALETTE, PEDS, PLAYER,
+  POLICE, ROADS_X, ROADS_Y, ROAD_W, STASHES, TRAFFIC, WANTED, WORLD,
 } from './config.js';
-import { angleDiff, angleTo, clamp, dist2, pick, range } from './random.js';
+import { angleDiff, angleTo, clamp, dist2, pick, range, shuffle } from './random.js';
 
 export const EVENT_PUNCH = 1;
 export const EVENT_PICKUP = 2;
@@ -17,6 +17,7 @@ export const EVENT_WASTED = 16;
 export const EVENT_BUSTED = 32;
 export const EVENT_WANTED_UP = 64;
 export const EVENT_HIT_PLAYER = 128;
+export const EVENT_STASH = 256;
 
 const CAR_COLORS = ['#d94f3d', '#3d7bd9', '#e8e8e8', '#2f2f33', '#7fb069', '#c96fb0', '#e07b39', '#5bc0be'];
 const CAR_KINDS = ['sedan', 'sedan', 'sedan', 'taxi', 'van', 'truck'];
@@ -53,6 +54,14 @@ function pushCircleOutOfRect(circle, r, rect) {
   return true;
 }
 
+/** Which named district a point of the map is in (HUD + minimap label). */
+export function districtAt(x, y) {
+  for (const d of DISTRICTS) {
+    if (x >= d.x0 && x < d.x1 && y >= d.y0 && y < d.y1) return d.name;
+  }
+  return 'SOLMAR BAY';
+}
+
 export function createWorld(random) {
   // ---- city generation (seeded, so every seed builds the same Solmar Bay) ----
   const buildings = [];
@@ -62,6 +71,7 @@ export function createWorld(random) {
   const garage = { x: 620, y: 540, w: 160, h: 110 };
   const hideout = { x: 260, y: 200, w: 130, h: 110 };
   const marina = { x: 2660, y: 2020, w: 180, h: 120 };
+  const airstrip = { x: AIRSTRIP.x, y: AIRSTRIP.y, w: AIRSTRIP.w, h: AIRSTRIP.h };
 
   const roadXs = [0, ...ROADS_X, WORLD.width];
   const roadYs = [0, ...ROADS_Y, BEACH_Y];
@@ -145,6 +155,12 @@ export function createWorld(random) {
   const police = [];
   const particles = [];
   const pickups = [];
+  const feed = [];
+
+  function addFeed(text) {
+    feed.push({ text, ttl: KILLFEED.ttl });
+    while (feed.length > KILLFEED.max) feed.shift();
+  }
 
   function reset() {
     cars.length = 0;
@@ -152,6 +168,7 @@ export function createWorld(random) {
     police.length = 0;
     particles.length = 0;
     pickups.length = 0;
+    feed.length = 0;
     nextCarId = 1;
     nextPedId = 1;
     player.x = 1180;
@@ -167,12 +184,13 @@ export function createWorld(random) {
     player.invuln = 0;
     // The hero car for mission 1, parked on Palma Avenue.
     cars.push(makeCar(1290, 1000, Math.PI / 2, 'sport', '#ffd60a', { id: 'comet', parked: true }));
-    // Parked cars scattered along the avenues.
-    const parkedSpots = [
+    // Parked cars scattered along the avenues (shuffled, so no two seeds
+    // park the same car in the same spot).
+    const parkedSpots = shuffle(random, [
       [300, 700, 0], [780, 1180, Math.PI], [1300, 700, 0], [1800, 1620, Math.PI],
       [2300, 700, 0], [2800, 1180, Math.PI], [780, 1620, 0], [2300, 1620, Math.PI],
       [300, 1620, 0], [1800, 700, Math.PI], [2800, 1620, 0], [1300, 1620, Math.PI],
-    ];
+    ]);
     for (const [x, y, a] of parkedSpots) {
       cars.push(makeCar(x, y, a, pick(random, CAR_KINDS), pick(random, CAR_COLORS), { parked: true }));
     }
@@ -200,6 +218,11 @@ export function createWorld(random) {
     for (let i = 0; i < 4; i += 1) {
       pickups.push({ x: range(random, 120, WORLD.width - 120), y: range(random, 120, BEACH_Y - 60), kind: 'health', amount: 30, active: true, bob: random() * 6 });
     }
+    // Ten hidden stashes of dirty cash, tucked in alleys and behind
+    // buildings — free-roam collectibles worth $150 each.
+    for (let i = 0; i < STASHES.count; i += 1) {
+      pickups.push({ x: range(random, 120, WORLD.width - 120), y: range(random, 120, BEACH_Y - 60), kind: 'stash', amount: STASHES.amount, active: true, bob: random() * 6 });
+    }
     state.time = 0;
     state.wanted = 0;
     state.wantedLevel = 0;
@@ -209,16 +232,16 @@ export function createWorld(random) {
     state.arrestProgress = 0;
     state.camera.x = player.x;
     state.camera.y = player.y;
-    state.stats = { carsStolen: 0, pedsDown: 0, missionsDone: 0, cashCollected: 0 };
+    state.stats = { carsStolen: 0, pedsDown: 0, missionsDone: 0, cashCollected: 0, stashesFound: 0 };
   }
 
   const state = {
-    time: 0, player, cars, peds, police, particles, pickups,
-    buildings, palms, park, bank, garage, hideout, marina,
+    time: 0, player, cars, peds, police, particles, pickups, feed,
+    buildings, palms, park, bank, garage, hideout, marina, airstrip,
     wanted: 0, wantedLevel: 0, crimeTimer: 0,
     packageCarried: false, vaultProgress: 0, arrestProgress: 0,
     camera: { x: player.x, y: player.y },
-    stats: { carsStolen: 0, pedsDown: 0, missionsDone: 0, cashCollected: 0 },
+    stats: { carsStolen: 0, pedsDown: 0, missionsDone: 0, cashCollected: 0, stashesFound: 0 },
   };
 
   function carById(id) {
@@ -342,10 +365,15 @@ export function createWorld(random) {
         ped.y += Math.sin(player.faceAngle) * 14;
         burst(ped.x, ped.y, '#ffffff', 8, 160);
         hitAnything = true;
+        // Any landed punch draws heat; the knock-out draws the rest.
+        if (ped.hp > 0) {
+          if (addWanted(WANTED.punchHit)) events |= EVENT_WANTED_UP;
+        }
         if (ped.hp <= 0) {
           ped.mode = 'down';
           ped.downTimer = 6;
           state.stats.pedsDown += 1;
+          addFeed('RAY knocked out a local');
           if (addWanted(WANTED.punchPed)) events |= EVENT_WANTED_UP;
           if (random() < 0.6) pickups.push({ x: ped.x, y: ped.y, kind: 'cash', amount: 20, active: true, bob: 0 });
         }
@@ -363,6 +391,7 @@ export function createWorld(random) {
         if (cop.hp <= 0) {
           cop.hp = 0;
           cop.down = true;
+          addFeed('RAY dropped a cop');
           burst(cop.x, cop.y, '#2f7bff', 14, 200);
         }
       }
@@ -397,10 +426,15 @@ export function createWorld(random) {
       peds.push(driver);
       car.driver = null;
       state.stats.carsStolen += 1;
+      addFeed(`RAY carjacked a ${car.kind}`);
       if (addWanted(WANTED.stealCar)) events |= EVENT_WANTED_UP;
       events |= EVENT_STEAL;
     } else if (car.parked) {
-      state.stats.carsStolen += car.id === 'comet' ? 0 : 0;
+      // Stealing any parked car counts — the Comet included — and is a
+      // crime unless it is the mission's own Comet handover.
+      state.stats.carsStolen += 1;
+      if (car.id === 'comet') addFeed('RAY stole the yellow Comet');
+      else addFeed(`RAY stole a parked ${car.kind}`);
       if (car.id !== 'comet') {
         // Stealing any parked car is still a crime in Solmar Bay.
         if (addWanted(WANTED.stealCar)) events |= EVENT_WANTED_UP;
@@ -424,9 +458,6 @@ export function createWorld(random) {
       let target = car.cruise;
       for (const other of cars) {
         if (other === car) continue;
-        if (other.axis === undefined && !other.traffic && !other.police) {
-          // Player-driven or parked car: check ahead along this car's axis.
-        }
         const ahead = car.axis === 'x'
           ? (other.y > car.y - 34 && other.y < car.y + 34 && (other.x - car.x) * car.dir > 0 && (other.x - car.x) * car.dir < 90)
           : (other.x > car.x - 34 && other.x < car.x + 34 && (other.y - car.y) * car.dir > 0 && (other.y - car.y) * car.dir < 90);
@@ -634,6 +665,7 @@ export function createWorld(random) {
             ped.hp = 0;
             ped.hitCooldown = 2;
             state.stats.pedsDown += 1;
+            addFeed('RAY ran over a local');
             if (addWanted(WANTED.hitPedWithCar)) events |= EVENT_WANTED_UP;
             burst(ped.x, ped.y, '#ff4b3e', 12, 240);
             events |= EVENT_CRASH;
@@ -702,6 +734,12 @@ export function createWorld(random) {
           if (pk.kind === 'cash') {
             player.money += pk.amount;
             state.stats.cashCollected += pk.amount;
+          } else if (pk.kind === 'stash') {
+            player.money += pk.amount;
+            state.stats.cashCollected += pk.amount;
+            state.stats.stashesFound += 1;
+            addFeed(`RAY found a hidden stash +$${pk.amount}`);
+            events |= EVENT_STASH;
           } else {
             player.hp = Math.min(PLAYER.maxHealth, player.hp + pk.amount);
           }
@@ -716,6 +754,11 @@ export function createWorld(random) {
     let events = 0;
     state.time += dt;
     if (state.crimeTimer > 0) state.crimeTimer -= dt;
+    // Killfeed entries fade out on their own clock.
+    for (let i = feed.length - 1; i >= 0; i -= 1) {
+      feed[i].ttl -= dt;
+      if (feed[i].ttl <= 0) feed.splice(i, 1);
+    }
     // Wanted decays when the player is laying low.
     if (state.wanted > 0 && state.crimeTimer <= 0) {
       let anyCopNear = false;
@@ -761,6 +804,7 @@ export function createWorld(random) {
       x: player.x, y: player.y, hp: player.hp, money: player.money,
       wanted: state.wanted, missionsDone: state.stats.missionsDone,
       time: state.time, packageCarried: state.packageCarried,
+      stashesFound: state.stats.stashesFound,
     };
   }
 
@@ -773,6 +817,7 @@ export function createWorld(random) {
     state.wantedLevel = Math.floor(state.wanted + 0.001);
     state.packageCarried = !!save.packageCarried;
     state.time = save.time ?? 0;
+    state.stats.stashesFound = save.stashesFound ?? 0;
     state.camera.x = player.x;
     state.camera.y = player.y;
   }
@@ -780,6 +825,6 @@ export function createWorld(random) {
   reset();
   return {
     state, reset, step, carById, playerCar, nearestCar, addWanted, setWanted,
-    serialize, deserialize, onRoad, burst, spawnPoliceCar,
+    serialize, deserialize, onRoad, burst, spawnPoliceCar, addFeed, districtAt,
   };
 }

@@ -3,6 +3,9 @@
 // autopilot (walk/drive toward the mission marker, steer around buildings),
 // so the frame is what real play looks like and the same seed always gives
 // the same frame. No scene is posed by hand.
+// Scene order in shots.json puts the chase first: it is the cover, because
+// it shows the full HUD at once — wanted stars, objective, killfeed,
+// minimap with the mission marker and police, speed and the district name.
 import { STEP } from './config.js';
 import { SCREEN_PLAY, SCREEN_TITLE } from './render.js';
 
@@ -76,8 +79,11 @@ export function stageShot(name, world, missions) {
     world.step(STEP, { x: 0, y: 0, sprint: false }, 4); // E: steal the Comet
     missions.startMission(2);
     missions.state.dialogue = null;
-    missions.state.banner = { text: 'HEAT WAVE', sub: 'Lose the wanted level — hide from the police', timer: 99 };
     world.setWanted(3);
+    // The killfeed keeps the steal and the heat, so the cover frame shows
+    // it live under the minimap. (The mission banner fades on its own
+    // 3.2 s timer during the drive, so it never covers the player's car.)
+    world.addFeed('WANTED LEVEL 3 — HEAT WAVE');
     world.spawnPoliceCar();
     world.spawnPoliceCar();
     // Line the pursuit up on the same street, a few hundred pixels behind

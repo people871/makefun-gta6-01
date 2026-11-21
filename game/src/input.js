@@ -14,8 +14,10 @@ const RIGHT = new Set(['ArrowRight', 'KeyD']);
 const SPRINT = new Set(['ShiftLeft', 'ShiftRight']);
 const CONFIRM = new Set(['Enter', 'Space']);
 const PAUSE = new Set(['KeyP', 'Escape']);
-const INTERACT = new Set(['KeyE']);
-const PUNCH = new Set(['KeyF', 'KeyJ']);
+// E steals and enters cars; V is the same action for left-handed players.
+const INTERACT = new Set(['KeyE', 'KeyV']);
+// F or J punches; X is a third way, so a mouse-free player always has one.
+const PUNCH = new Set(['KeyF', 'KeyJ', 'KeyX']);
 const MUTE = new Set(['KeyM']);
 
 export function createInput(target) {
@@ -86,6 +88,7 @@ export function createInput(target) {
     mouse() {
       return { x: mouseX, y: mouseY };
     },
+    /** One-shot actions queued since the last take, as bit flags. */
     takeActions() {
       const taken = actions;
       actions = 0;

@@ -1,4 +1,4 @@
-// SOLMAR HEAT — tuning, palette and city layout in one place.
+// SOLMAR HEAT — tuning, palette, districts and city layout in one place.
 // A top-down open-world crime game in the fictional city of Solmar Bay.
 // The world is a fixed 3200x2400 map; the renderer shows a 1280x720 window of it.
 export const VIEW = { width: 1280, height: 720 };
@@ -11,6 +11,19 @@ export const ROADS_X = [240, 740, 1240, 1740, 2240, 2740];
 export const ROADS_Y = [220, 660, 1100, 1540, 1980];
 export const ROAD_W = 96;
 export const BEACH_Y = 2180; // sand and sea south of this line
+
+// Six named districts, so the HUD and the minimap can say where Ray is.
+export const DISTRICTS = [
+  { name: 'OLD TOWN', x0: 0, y0: 0, x1: 1000, y1: 900 },
+  { name: 'DOWNTOWN', x0: 1000, y0: 0, x1: 2000, y1: 900 },
+  { name: 'HARBOR HEIGHTS', x0: 2000, y0: 0, x1: 3200, y1: 900 },
+  { name: 'PALMA AVE', x0: 0, y0: 900, x1: 1600, y1: 1980 },
+  { name: 'SOLMAR PARK', x0: 1600, y0: 900, x1: 3200, y1: 1980 },
+  { name: 'BEACHFRONT', x0: 0, y0: 1980, x1: 3200, y1: 2400 },
+];
+
+// The airstrip on the beachfront, where the final mission ends.
+export const AIRSTRIP = { x: 2960, y: 2190, w: 220, h: 60 };
 
 export const STEP = 1 / 60;
 
@@ -38,9 +51,14 @@ export const CAR = {
   enterRange: 84,
 };
 
-export const TRAFFIC = { count: 16, minSpeed: 120, maxSpeed: 210 };
-export const PEDS = { count: 26, walkSpeed: 46, fleeSpeed: 150 };
+export const TRAFFIC = { count: 20, minSpeed: 120, maxSpeed: 210 };
+export const PEDS = { count: 32, walkSpeed: 46, fleeSpeed: 150 };
 export const POLICE = { maxCars: 4, maxFoot: 4, carSpeed: 520, footSpeed: 235, arrestRange: 34, arrestTime: 2.2 };
+
+// Ten hidden stashes of dirty cash, tucked around the city for free roam.
+export const STASHES = { count: 10, amount: 150 };
+
+export const KILLFEED = { max: 4, ttl: 6 };
 
 export const WANTED = {
   max: 5,
@@ -48,6 +66,7 @@ export const WANTED = {
   decayHiddenBonus: 0.09, // and faster while the player is out of every cop's sight
   stealCar: 1,
   punchPed: 1,
+  punchHit: 0.5, // a landed punch already draws heat; the knock-out adds the rest
   hitPedWithCar: 1,
   damagePolice: 1,
 };
@@ -90,6 +109,11 @@ export const PALETTE = {
   money: '#7be382',
   title: '#ffd166',
   titleShadow: '#b34700',
+  feed: '#ffd166',
+  district: '#c9c2ae',
+  runway: '#5a6068',
+  runwayLine: '#e8d44d',
+  stash: '#7be382',
 };
 
 export const FONT = 'system-ui, -apple-system, "Segoe UI", sans-serif';

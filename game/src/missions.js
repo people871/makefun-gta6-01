@@ -1,5 +1,5 @@
 // Missions and story for SOLMAR HEAT.
-// Four chained jobs for Ray "Vela" Cruz, a driver fresh out of Solmar Bay's
+// Five chained jobs for Ray "Vela" Cruz, a driver fresh out of Solmar Bay's
 // impound lot, working for fixer Rico Marín. Pure data + a small tracker that
 // reads world.state and reports events; it never draws anything.
 export const MISSIONS = [
@@ -61,6 +61,21 @@ export const MISSIONS = [
       { text: 'Escape with the cash — reach the safehouse', target: { x: 300, y: 260, label: 'Safehouse' }, radius: 90, action: 'reach' },
     ],
   },
+  {
+    id: 'clean-slate',
+    title: '5 — Clean Slate',
+    reward: 1500,
+    briefing: [
+      'RICO: The bank job put your face on every screen in Solmar Bay.',
+      'RICO: Four stars. A plane waits on the Beachfront airstrip.',
+      'RICO: Reach it with the heat on you, then shake the cops and vanish.',
+    ],
+    steps: [
+      { text: 'Reach the Beachfront airstrip — wanted level 4', target: { x: 2960, y: 2220, label: 'Airstrip' }, radius: 110, action: 'reach' },
+      { text: 'Lose the wanted level — hide from the police', target: null, radius: 0, action: 'evade' },
+      { text: 'Heat gone. Reach the safehouse to disappear', target: { x: 300, y: 260, label: 'Safehouse' }, radius: 90, action: 'reach' },
+    ],
+  },
 ];
 
 export function createMissions(world) {
@@ -101,6 +116,7 @@ export function createMissions(world) {
     showBanner(m.title, 'New mission — ' + m.steps[0].text);
     if (m.id === 'heat-wave') world.setWanted(2);
     if (m.id === 'the-big-score') world.setWanted(0);
+    if (m.id === 'clean-slate') world.setWanted(4);
     return { type: 'mission-start', mission: m.id };
   }
 
@@ -108,6 +124,7 @@ export function createMissions(world) {
     const m = mission();
     world.state.player.money += m.reward;
     world.state.stats.missionsDone += 1;
+    world.addFeed(`Mission complete — ${m.title} +$${m.reward}`);
     showBanner('Mission complete', `${m.title} — +$${m.reward}`);
     const events = [{ type: 'mission-complete', mission: m.id, reward: m.reward }];
     state.active = false;
@@ -133,6 +150,12 @@ export function createMissions(world) {
     if (!state.active) return state.finished ? 'Story complete — free roam Solmar Bay' : 'No mission yet';
     const s = stepDef();
     return s ? s.text : '';
+  }
+
+  /** "MISSION 3/5" for the HUD, or "" when no mission is running. */
+  function missionCounter() {
+    if (!state.active) return '';
+    return `MISSION ${state.index + 1}/${MISSIONS.length}`;
   }
 
   function marker() {
@@ -209,6 +232,7 @@ export function createMissions(world) {
     completeMission,
     advanceDialogue,
     currentObjective,
+    missionCounter,
     marker,
     update,
     showBanner,
