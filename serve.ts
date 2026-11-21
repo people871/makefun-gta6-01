@@ -1,6 +1,6 @@
 // A tiny static server for SOLMAR HEAT's game/ (Node 22, standard library only),
 // so the entry can be played locally without a build step:
-// `node serve.ts` serves game/ on http://localhost:8080 (or --port N).
+// `node serve.ts` serves game/ on http://localhost:8080 (or --port N --host H).
 // It sends the MIME types a browser game needs, refuses any path outside game/,
 // and otherwise does nothing clever: a development convenience, not a web
 // server for the internet. The shipped game itself needs no server at all —
@@ -12,9 +12,13 @@ import { fileURLToPath } from 'node:url';
 
 const root = resolve(fileURLToPath(new URL('./game', import.meta.url)));
 const args = process.argv.slice(2);
-const portIndex = args.indexOf('--port');
-const requested = portIndex === -1 ? 8080 : Number(args[portIndex + 1]);
-const port = Number.isInteger(requested) && requested > 0 && requested < 65536 ? requested : 8080;
+function flagValue(name, fallback) {
+  const i = args.indexOf(name);
+  return i === -1 || i + 1 >= args.length ? fallback : args[i + 1];
+}
+const requestedPort = Number(flagValue('--port', '8080'));
+const port = Number.isInteger(requestedPort) && requestedPort > 0 && requestedPort < 65536 ? requestedPort : 8080;
+const host = flagValue('--host', '127.0.0.1');
 
 const MIME: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
@@ -70,6 +74,6 @@ createServer((request, response) => {
     'cache-control': 'no-store',
   });
   createReadStream(file).pipe(response);
-}).listen(port, '127.0.0.1', () => {
-  console.log(`SOLMAR HEAT game/ is on http://localhost:${port}`);
+}).listen(port, host, () => {
+  console.log(`SOLMAR HEAT game/ is on http://${host}:${port}`);
 });
